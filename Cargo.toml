@@ -1,0 +1,3 @@
+[workspace]
+members = ["aegis", "cli", "client", "pyaegis", "libaegis"]
+resolver = "3"
