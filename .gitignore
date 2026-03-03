@@ -3,3 +3,5 @@
 /.venv
 /.vscode
 /angr
+/aegis.bundle
+test_results.txt

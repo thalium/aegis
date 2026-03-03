@@ -561,6 +561,8 @@ mod pyaegis {
                 panic!("Unrecognized write argument");
             };
 
+            Box::leak("a".to_string().into_boxed_str());
+
             Self {
                 aegis: Some(aegis),
                 cancel,
