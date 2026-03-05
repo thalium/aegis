@@ -418,8 +418,10 @@ mod pyaegis {
                 id,
                 name,
                 start_state: start_state.0.clone(),
-                end_state: end_state.0.clone(),
+                end_state: Some(end_state.0.clone()),
                 instruction: insn.to_owned(),
+                exception_kind: None,
+                exception_instruction: vec![],
             })
         }
 
@@ -434,13 +436,26 @@ mod pyaegis {
         }
 
         #[getter]
-        pub fn end_state(&self) -> PyCpuState {
-            PyCpuState(self.0.end_state.clone())
+        pub fn end_state(&self) -> Option<PyCpuState> {
+            self.0.end_state.clone().map(PyCpuState)
         }
 
         #[getter]
         pub fn insn(&self) -> Vec<u8> {
             self.0.instruction.clone()
+        }
+
+        #[getter]
+        pub fn exception_kind(&self) -> Option<String> {
+            self.0
+                .exception_kind
+                .as_ref()
+                .map(|kind| kind.as_str().to_owned())
+        }
+
+        #[getter]
+        pub fn exception_insn(&self) -> Vec<u8> {
+            self.0.exception_instruction.clone()
         }
 
         #[getter]
@@ -458,12 +473,14 @@ mod pyaegis {
     #[pymethods]
     impl PyAegis {
         #[new]
+        #[pyo3(signature = (serial_sock, shared_mem, read, write, quiet = false))]
         pub fn new(
             py: Python<'_>,
             serial_sock: String,
             shared_mem: String,
             read: Py<PyFunction>,
             write: Bound<'_, PyAny>,
+            quiet: bool,
         ) -> Self {
             Python::initialize();
 
@@ -474,7 +491,11 @@ mod pyaegis {
                 let mut aegis = Aegis::new(AegisConfig {
                     serial_sock: &serial_sock,
                     shared_mem: &shared_mem,
-                    verbosity: client::Verbosity::Verbose,
+                    verbosity: if quiet {
+                        client::Verbosity::Quiet
+                    } else {
+                        client::Verbosity::Verbose
+                    },
                     cancel: cancel_aegis,
                 });
 

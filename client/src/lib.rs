@@ -18,7 +18,7 @@ use iced_x86::{Encoder, Instruction};
 use libaegis::{
     cpu::CpuState,
     protocol::{CONTINUE_MSG, EXIT_MSG, INIT_MSG, READ_MSG, WRITE_MSG, WRITE_REGION_OFFSET},
-    testcase::{TestCase, TestId, TestResult},
+    testcase::{ExceptionKind, TestCase, TestId, TestOutcome, TestResult},
 };
 use memmap2::MmapMut;
 
@@ -32,7 +32,9 @@ pub struct Test {
     pub name: String,
     pub instruction: Vec<u8>,
     pub start_state: CpuState,
-    pub end_state: CpuState,
+    pub end_state: Option<CpuState>,
+    pub exception_kind: Option<ExceptionKind>,
+    pub exception_instruction: Vec<u8>,
 }
 
 #[derive(Clone)]
@@ -48,7 +50,7 @@ struct Reader<R> {
 
 impl<R> Reader<R>
 where
-    R: FnMut(Test) -> (),
+    R: FnMut(Test),
 {
     async fn run(mut self) {
         while let Some(test) = self.rx.next().await {
@@ -224,7 +226,7 @@ impl Aegis {
 
     pub fn set_read_executor<R>(&mut self, read_executor: R)
     where
-        R: FnMut(Test) -> () + Send + 'static,
+        R: FnMut(Test) + Send + 'static,
     {
         if self.reader_handle.is_some() {
             panic!("The read executor was already set");
@@ -322,7 +324,7 @@ impl Aegis {
             results.push(result);
         }
 
-        write!(self.sock, "{}\n", CONTINUE_MSG).expect("[*] Failed to send continue message");
+        writeln!(self.sock, "{}", CONTINUE_MSG).expect("[*] Failed to send continue message");
 
         results
     }
@@ -348,7 +350,23 @@ impl Aegis {
                         .copied()
                         .collect::<Vec<u8>>(),
                     start_state: previous.state.clone(),
-                    end_state: previous.state.diff(&result.diff),
+                    end_state: match &result.outcome {
+                        TestOutcome::Completed(diff) => Some(previous.state.diff(diff)),
+                        TestOutcome::Exception(_) => None,
+                    },
+                    exception_kind: match &result.outcome {
+                        TestOutcome::Completed(_) => None,
+                        TestOutcome::Exception(info) => Some(info.kind),
+                    },
+                    exception_instruction: match &result.outcome {
+                        TestOutcome::Completed(_) => vec![],
+                        TestOutcome::Exception(info) => info
+                            .insn
+                            .iter()
+                            .take(info.size as usize)
+                            .copied()
+                            .collect::<Vec<u8>>(),
+                    },
                 })
                 .await
                 .expect("Error");
@@ -369,7 +387,7 @@ impl Aegis {
         }
 
         let written_bytes = unsafe { end_ptr.offset_from(start) };
-        write!(self.sock, "{}: {}\n", CONTINUE_MSG, written_bytes)
+        writeln!(self.sock, "{}: {}", CONTINUE_MSG, written_bytes)
             .expect("Error sending continue message");
 
         log!(
@@ -453,7 +471,15 @@ impl Aegis {
             let results = self.read_get_tests(args);
             assert_eq!(results.len(), 1);
 
-            self.zero_state = results.into_iter().next().unwrap().diff;
+            self.zero_state = match results.into_iter().next().unwrap().outcome {
+                TestOutcome::Completed(state) => state,
+                TestOutcome::Exception(exception) => {
+                    panic!(
+                        "Initialization test failed with exception {}",
+                        exception.kind.as_str()
+                    )
+                }
+            };
             self.zero_state.rip -= insn_len;
         }
     }
@@ -462,7 +488,7 @@ impl Aegis {
     pub fn init(&mut self) {
         // Try to initialize the socket
         loop {
-            write!(self.sock, "{}\n", INIT_MSG).expect("[*] Failed to send init message");
+            writeln!(self.sock, "{}", INIT_MSG).expect("[*] Failed to send init message");
 
             let mut reader = BufReader::new(&self.sock);
             let mut line = String::new();

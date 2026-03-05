@@ -5,12 +5,27 @@ const SERIAL_SOCK: &str = "/tmp/serial.sock";
 const SHARED_MEM: &str = "/dev/shm/ivshmem";
 
 fn read(result: Test) {
+    if let Some(kind) = result.exception_kind {
+        println!(
+            "Test {} raised {} on bytes {:02x?}",
+            result.id,
+            kind.as_str(),
+            result.exception_instruction
+        );
+        return;
+    }
+
+    let end_state = result
+        .end_state
+        .as_ref()
+        .expect("Non-exception tests should have an end state");
+
     assert_eq!(
         result.start_state.gpr.rax + result.start_state.gpr.rbx,
-        result.end_state.gpr.rax
+        end_state.gpr.rax
     );
 
-    assert_eq!(result.start_state.gpr.rbx, result.end_state.gpr.rbx);
+    assert_eq!(result.start_state.gpr.rbx, end_state.gpr.rbx);
 }
 
 fn write(id: usize) -> Option<NamedTestCase> {

@@ -1,5 +1,9 @@
 use alloc::{boxed::Box, format, string::String, vec::Vec};
-use libaegis::{cpu::*, testcase::TestCase, wrap};
+use libaegis::{
+    cpu::*,
+    testcase::{ExceptionInfo, ExceptionKind, TestCase},
+    wrap,
+};
 use paste::paste;
 use raw_cpuid::CpuId;
 use x86_64::{
@@ -89,7 +93,7 @@ pub fn create_cpu_dump_pages(kernel: &mut Kernel) -> Result<(), MapToError<Size4
 
     for _ in 0..4 {
         kernel.memory_manager.map_addr(page.start_address())?;
-        page = page + 1;
+        page += 1;
     }
 
     Ok(())
@@ -113,13 +117,16 @@ pub trait Dataset: Sync + Send {
     /// Returns the next test of the dataset
     fn next(&self) -> TestCase;
 
-    fn after_test(&mut self, id: TestId, state: &CpuState);
+    fn after_test(&mut self, id: TestId, state: &CpuState, exception: Option<ExceptionInfo>);
 }
 
 pub static DATASET: Mutex<Option<Box<dyn Dataset>>> = Mutex::new(None);
 pub static TEST_ID: Mutex<TestId> = Mutex::new(0);
 
 pub static TEST_INSN: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+pub static TEST_EXCEPTION: Mutex<Option<ExceptionKind>> = Mutex::new(None);
+
+const INTERRUPT_FLAG_MASK: u64 = 1 << 9;
 
 fn print_last_insn() {
     let s = TEST_INSN
@@ -131,6 +138,10 @@ fn print_last_insn() {
     println!("Last instruction: {}", s);
 }
 
+fn mark_exception(kind: ExceptionKind) {
+    *TEST_EXCEPTION.lock() = Some(kind);
+}
+
 // The custom page_fault_handler
 fn page_fault_handler(
     state: &CpuState,
@@ -138,12 +149,19 @@ fn page_fault_handler(
     error_code: PageFaultErrorCode,
     rip: &mut u64,
 ) {
-    if error_code != PageFaultErrorCode::INSTRUCTION_FETCH {
+    if *rip < ICE_START as u64 || *rip > FIRE_START as u64 {
         print_last_insn();
-        panic!("This looks like a real page fault: {:?}", stack_frame);
+        panic!(
+            "Unexpected page fault while not in test area: {:?}",
+            stack_frame
+        );
     }
 
-    // x86_64::instructions::interrupts::enable();
+    if error_code != PageFaultErrorCode::INSTRUCTION_FETCH {
+        print_last_insn();
+        mark_exception(ExceptionKind::PageFault);
+        x86_64::instructions::interrupts::disable();
+    }
 
     landing_pad(state);
     *rip = run_naked_test as *const () as u64;
@@ -161,7 +179,7 @@ pub extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptSta
 
 // Double fault handler
 pub fn double_fault_handler(
-    _state: &CpuState,
+    state: &CpuState,
     stack_frame: &InterruptStackFrame,
     _error_code: PageFaultErrorCode,
     rip: &mut u64,
@@ -172,9 +190,9 @@ pub fn double_fault_handler(
         panic!("EXCEPTION: DOUBLE FAULT\n{:#?}", stack_frame);
     }
 
-    println!("! DOUBLE FAULT");
-
-    // Ignore this test so no landing pad
+    mark_exception(ExceptionKind::DoubleFault);
+    x86_64::instructions::interrupts::disable();
+    landing_pad(state);
 
     *rip = run_naked_test as *const () as u64;
 }
@@ -233,6 +251,8 @@ pub extern "C" fn run_naked_test() {
 
 #[doc(hidden)]
 pub extern "C" fn run_test_(rsp: u64) -> ! {
+    x86_64::instructions::interrupts::disable();
+
     let mut test = {
         let dataset = DATASET.lock();
 
@@ -243,18 +263,17 @@ pub extern "C" fn run_test_(rsp: u64) -> ! {
     };
 
     *TEST_ID.lock() = test.id;
+    *TEST_EXCEPTION.lock() = None;
 
     // Write the instruction
 
     // Save the instruction for error logging
-    *TEST_INSN.lock() = test.insn[..test.size as usize]
-        .iter()
-        .copied()
-        .collect::<Vec<u8>>();
+    *TEST_INSN.lock() = test.insn[..test.size as usize].to_vec();
 
     let rip = set_ice_instruction(&test.insn[..test.size as usize]).as_u64();
     test.state.rip = rip;
     test.state.gpr.rsp = rsp;
+    test.state.flags.0 &= !INTERRUPT_FLAG_MASK;
 
     // Sets the registers
     // jump to rip
@@ -356,10 +375,27 @@ pub extern "C" fn run_test_(rsp: u64) -> ! {
 }
 
 pub fn landing_pad(state: &CpuState) {
+    x86_64::instructions::interrupts::disable();
+
+    let exception = TEST_EXCEPTION.lock().take();
+    let exception = exception.map(|kind| {
+        let mut insn = [0u8; 15];
+        let test_insn = TEST_INSN.lock();
+        let insn_size = core::cmp::min(test_insn.len(), insn.len());
+
+        insn[..insn_size].copy_from_slice(&test_insn[..insn_size]);
+
+        ExceptionInfo {
+            kind,
+            insn,
+            size: insn_size as u8,
+        }
+    });
+
     {
         // run some logic
         match DATASET.lock().as_mut() {
-            Some(d) => d.after_test(*TEST_ID.lock(), state),
+            Some(d) => d.after_test(*TEST_ID.lock(), state, exception),
             None => panic!("No dataset"),
         };
     }

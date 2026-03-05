@@ -5,3 +5,4 @@
 /angr
 /aegis.bundle
 test_results.txt
+__pycache__

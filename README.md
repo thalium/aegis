@@ -63,7 +63,9 @@ python client.py
 A client must provide two callbacks:
 
 - **Reader** (`reader(PyTest) -> None`)
-  Recieves the instruction execution results and CPU state before/after execution.
+    Recieves the instruction execution results and CPU state before/after execution.
+    When an exception occurs during a test, `res.exception_kind` and
+    `res.exception_insn` are populated and `res.end_state` is `None`.
   Here's where you add your own lifter's code
 
 - **Writer** (`writer(int) -> PyNamedTestCase | None`)

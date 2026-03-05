@@ -8,6 +8,15 @@ SHARED_MEM = "/dev/shm/ivshmem"
 
 # Use the results
 def reader(res: PyTest) -> None:
+    exception_kind = getattr(res, "exception_kind", None)
+    exception_insn = getattr(res, "exception_insn", [])
+
+    if exception_kind is not None:
+        print(f"exception={exception_kind} insn={bytes(exception_insn).hex()}")
+        return
+
+    assert res.end_state is not None
+
     # Run any test with results
     assert (
         res.end_state.rax

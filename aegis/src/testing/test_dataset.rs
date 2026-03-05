@@ -1,6 +1,6 @@
 use libaegis::{
     cpu::CpuState,
-    testcase::{TestCase, TestResult},
+    testcase::{ExceptionInfo, TestCase, TestOutcome, TestResult},
 };
 
 use crate::testing::{
@@ -40,10 +40,16 @@ impl Dataset for TestDataset {
     }
 
     /// Here we can save / inspect test results
-    fn after_test(&mut self, id: TestId, state: &CpuState) {
-        let diff = state.diff(unsafe { &INITIAL_CPU_STATE });
+    fn after_test(&mut self, id: TestId, state: &CpuState, exception: Option<ExceptionInfo>) {
+        let outcome = match exception {
+            Some(exception) => TestOutcome::Exception(exception),
+            None => {
+                let diff = state.diff(unsafe { &INITIAL_CPU_STATE });
+                TestOutcome::Completed(diff)
+            }
+        };
 
-        let res = TestResult { id, diff };
+        let res = TestResult { id, outcome };
 
         let mut shared_mem_manager = SHARED_MEMORY_MANAGER.lock();
         let buff = shared_mem_manager.write_buffer();
