@@ -4,8 +4,7 @@ from collections.abc import Iterator
 from typing import Any, cast
 
 sys.path.insert(0, "/home/jack/dev/x86db")
-from db import open_db
-from psycopg2.extras import execute_values
+from db2 import CpuState, TestResult, bulk_upsert_results, iter_test_cases, open_db
 
 from pyaegis import PyAegis, PyCpuState, PyNamedTestCase, PyTest
 from tqdm import tqdm
@@ -16,79 +15,35 @@ SHARED_MEM = "/dev/shm/ivshmem"
 
 BATCH_SIZE = 10000
 
+DSN = os.environ.get("X86DB_DSN", "postgresql://x86db:x86db@localhost:5432/x86db")
+
 # Global state for test generation
 test_iter: Iterator[dict[str, object]] | None = None
-test_index = 0
 active_tests: dict[int, dict[str, object]] = {}
 db_con: Any = None
 
-pending_normal: list[tuple[int, int, dict[str, int]]] = []
-pending_exception: list[tuple[int, int, str | None]] = []
+pending: list[TestResult] = []
 
-REG_VALUE_MASK = 0xFFFFFFFFFFFF
-
-
-def _to_signed(v: int) -> int:
-    return v if v < 2**63 else v - 2**64
+REG_VALUE_MASK = 0xFFFF_FFFF_FFFF_FFFF
 
 
-def iter_test_specs_from_db(con) -> Iterator[dict]:
-    with con.cursor() as cur:
-        cur.execute(
-            """
-            SELECT tc.id, tc.instruction, tc.opcode, isv.state_index, isv.name, isv.value
-            FROM test_cases tc
-            JOIN initial_state_values isv ON isv.test_case_id = tc.id
-            LEFT JOIN test_results tr
-              ON tr.test_case_id = isv.test_case_id
-             AND tr.state_index = isv.state_index
-            WHERE tr.id IS NULL
-            ORDER BY tc.id, isv.state_index, isv.name
-            """
-        )
+def iter_test_specs_from_db(dsn: str) -> Iterator[dict]:
+    with open_db(dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT test_case_id, state_index FROM test_results")
+            completed: set[tuple[int, int]] = set(cur.fetchall())
 
-        current_test_case_id: int | None = None
-        current_instruction = ""
-        current_encoding = b""
-        current_state_index: int | None = None
-        current_state: dict[str, int] = {}
-
-        # Rows are ordered, so we can stream and emit one state payload at a time.
-        for test_case_id, instruction, opcode, state_index, name, value in cur:
-            is_new_state = (
-                current_test_case_id is None
-                or test_case_id != current_test_case_id
-                or state_index != current_state_index
-            )
-
-            if is_new_state:
-                if current_test_case_id is not None and current_state_index is not None:
-                    yield {
-                        "test_case_id": current_test_case_id,
-                        "state_index": current_state_index,
-                        "instruction": current_instruction,
-                        "encoding": current_encoding,
-                        "initial_state": current_state,
-                    }
-
-                if test_case_id != current_test_case_id:
-                    current_test_case_id = test_case_id
-                    current_instruction = instruction
-                    current_encoding = bytes.fromhex(opcode)
-
-                current_state_index = state_index
-                current_state = {}
-
-            current_state[name] = value
-
-        if current_test_case_id is not None and current_state_index is not None:
-            yield {
-                "test_case_id": current_test_case_id,
-                "state_index": current_state_index,
-                "instruction": current_instruction,
-                "encoding": current_encoding,
-                "initial_state": current_state,
-            }
+    for tc in iter_test_cases(dsn):
+        encoding = bytes.fromhex(tc.opcode)
+        for state_index, cpu_state in enumerate(tc.initial_states):
+            if (tc.id, state_index) not in completed:
+                yield {
+                    "test_case_id": tc.id,
+                    "state_index": state_index,
+                    "instruction": tc.instruction,
+                    "encoding": encoding,
+                    "initial_state": cpu_state.regs,
+                }
 
 
 def apply_state(cpu_state: PyCpuState, state_data: dict[str, int]) -> list[str]:
@@ -98,17 +53,10 @@ def apply_state(cpu_state: PyCpuState, state_data: dict[str, int]) -> list[str]:
             cpu_state.flags = value
             continue
 
-        setattr(cpu_state, key, value & 0xFFFFFFFFFFFFFFFF)
+        setattr(cpu_state, key, value & REG_VALUE_MASK)
         reg_keys.append(key)
 
     return reg_keys
-
-
-def normalize_state(state_data: dict[str, int]) -> dict[str, int]:
-    normalized = {key: int(value) & REG_VALUE_MASK for key, value in state_data.items()}
-    if "flag" not in normalized:
-        normalized["flag"] = 0
-    return normalized
 
 
 def serialize_state(
@@ -126,47 +74,18 @@ def serialize_state(
 
 
 def flush_results() -> None:
-    global db_con, pending_normal, pending_exception
+    global db_con, pending
 
-    if not pending_normal and not pending_exception:
+    if not pending:
         return
 
-    with db_con.cursor() as cur:
-        if pending_normal:
-            rows = execute_values(
-                cur,
-                "INSERT INTO test_results (test_case_id, state_index) VALUES %s RETURNING id, test_case_id, state_index",
-                [(tc_id, si) for tc_id, si, _ in pending_normal],
-                fetch=True,
-            )
-            id_map = {(tc_id, si): result_id for result_id, tc_id, si in rows}
-            state_rows = []
-            for tc_id, si, final_state in pending_normal:
-                result_id = id_map[(tc_id, si)]
-                for name, v in final_state.items():
-                    state_rows.append((result_id, name, _to_signed(v)))
-            execute_values(
-                cur,
-                "INSERT INTO result_state_values (test_result_id, name, value) VALUES %s",
-                state_rows,
-            )
-
-        if pending_exception:
-            execute_values(
-                cur,
-                "INSERT INTO test_results (test_case_id, state_index, exception_kind) VALUES %s",
-                pending_exception,
-            )
-
+    bulk_upsert_results(db_con, pending)
     db_con.commit()
-    pending_normal.clear()
-    pending_exception.clear()
+    pending.clear()
 
 
 def writer(id: int) -> PyNamedTestCase | None:
     """Generate test cases from queue"""
-    global test_index
-
     if test_iter is None:
         raise RuntimeError("Test iterator is not initialized")
 
@@ -175,7 +94,6 @@ def writer(id: int) -> PyNamedTestCase | None:
     except StopIteration:
         return None
 
-    # Create CPU state with specified values
     state = PyCpuState()
     initial_state = cast(dict[str, int], test_spec["initial_state"])
     encoding = cast(bytes, test_spec["encoding"])
@@ -187,7 +105,6 @@ def writer(id: int) -> PyNamedTestCase | None:
         "instruction": test_spec["instruction"],
         "encoding": encoding,
         "reg_keys": reg_keys,
-        "initial_state": normalize_state(initial_state),
     }
 
     test_name = f"{id}:{test_spec['test_case_id']}:{test_spec['state_index']}"
@@ -196,7 +113,7 @@ def writer(id: int) -> PyNamedTestCase | None:
 
 def reader(res: PyTest) -> None:
     """Process and store test results"""
-    global active_tests, pending_normal, pending_exception
+    global active_tests, pending
 
     test_meta = active_tests.pop(res.id, None)
     if test_meta is None:
@@ -207,11 +124,14 @@ def reader(res: PyTest) -> None:
 
     if res.end_state is None:
         exception_kind = getattr(res, "exception_kind", None)
-        pending_exception.append(
-            (
-                test_case_id,
-                state_index,
-                str(exception_kind) if exception_kind is not None else None,
+        pending.append(
+            TestResult(
+                test_case_id=test_case_id,
+                state_index=state_index,
+                exception_kind=(
+                    str(exception_kind) if exception_kind is not None else None
+                ),
+                final_state=None,
             )
         )
     else:
@@ -220,34 +140,38 @@ def reader(res: PyTest) -> None:
             cast(list[str], test_meta["reg_keys"]),
             include_rdx=True,
         )
-        pending_normal.append((test_case_id, state_index, final_state))
+        pending.append(
+            TestResult(
+                test_case_id=test_case_id,
+                state_index=state_index,
+                exception_kind=None,
+                final_state=CpuState(regs=final_state),
+            )
+        )
 
-    if len(pending_normal) + len(pending_exception) >= BATCH_SIZE:
+    if len(pending) >= BATCH_SIZE:
         flush_results()
 
 
 def main():
-    global test_iter, test_index, active_tests, db_con
+    global test_iter, active_tests, db_con
 
-    db_con = open_db(
-        os.environ.get("X86DB_DSN", "postgresql://x86db:x86db@localhost:5432/x86db")
-    )
+    db_con = open_db(DSN)
 
     with db_con.cursor() as cur:
         cur.execute(
             """
-            SELECT COUNT(*) FROM initial_state_values isv
-            LEFT JOIN test_results tr ON tr.test_case_id = isv.test_case_id AND tr.state_index = isv.state_index
-            WHERE tr.id IS NULL
+            SELECT
+                (SELECT SUM(jsonb_array_length(initial_states)) FROM test_cases) -
+                (SELECT COUNT(*) FROM test_results)
         """
         )
         total = cur.fetchone()[0]
 
     test_iter = cast(
         Iterator[dict[str, object]],
-        iter(tqdm(iter_test_specs_from_db(db_con), total=total)),
+        iter(tqdm(iter_test_specs_from_db(DSN), total=total)),
     )
-    test_index = 0
     active_tests = {}
 
     Aegis = PyAegis(
