@@ -4,6 +4,8 @@ use crate::{
         cpu::{double_fault_handler, page_fault_handler},
         hardware::{PICS, keyboard_interrupt_handler, timer_interrupt_handler},
     },
+    print, println,
+    testing::harness::TEST_INSN,
 };
 use paste::paste;
 use spin::Mutex;
@@ -101,10 +103,22 @@ impl InterruptManager {
     }
 }
 
+pub extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
+    let opcode = TEST_INSN.lock();
+
+    print!("Invalid opcode: ");
+    for byte in opcode.iter() {
+        print!("{:02x} ", byte);
+    }
+    println!("");
+
+    panic!("INVALID OPCODE ERROR\n{:#?}", stack_frame);
+}
+
 // Generates default handlers for
 default_handler!(breakpoint);
 default_handler!(device_not_available);
 default_handler!(divide_error);
 default_handler!(general_protection_fault);
-default_handler!(invalid_opcode);
+// default_handler!(invalid_opcode);
 default_handler!(overflow);

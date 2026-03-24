@@ -9,7 +9,7 @@ use raw_cpuid::CpuId;
 use x86_64::{
     VirtAddr,
     registers::{
-        control::{Cr4, Cr4Flags},
+        control::{Cr0, Cr0Flags, Cr4, Cr4Flags},
         xcontrol::{XCr0, XCr0Flags},
     },
     structures::{
@@ -127,6 +127,8 @@ pub static TEST_INSN: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 pub static TEST_EXCEPTION: Mutex<Option<ExceptionKind>> = Mutex::new(None);
 
 const INTERRUPT_FLAG_MASK: u64 = 1 << 9;
+const XSAVE_HEADER_OFFSET: usize = 512;
+const XSTATE_BV_XMM: u64 = 1 << 1;
 
 fn print_last_insn() {
     let s = TEST_INSN
@@ -200,14 +202,21 @@ pub fn double_fault_handler(
 wrap!(raw_double_fault_handler, double_fault_handler);
 
 pub fn init_dataset(dataset: Box<dyn Dataset>) {
-    // Verifies the CPU features
-    verify_cpu();
-
     // Enable the xsave instruction
     unsafe {
-        Cr4::update(|flags| *flags = flags.union(Cr4Flags::OSXSAVE));
-        XCr0::write(XCr0Flags::X87 | XCr0Flags::SSE | XCr0Flags::AVX);
+        Cr4::update(|flags| *flags = flags.union(Cr4Flags::OSXSAVE | Cr4Flags::OSFXSR));
+        XCr0::write(
+            XCr0Flags::X87
+                | XCr0Flags::SSE
+                | XCr0Flags::AVX
+                | XCr0Flags::OPMASK
+                | XCr0Flags::ZMM_HI256
+                | XCr0Flags::HI16_ZMM,
+        );
     }
+
+    // Verifies the CPU features
+    verify_cpu();
 
     // Sets the timer handler
     InterruptManager::set_handler(InterruptIndex::Timer as usize, timer_interrupt_handler);
@@ -274,6 +283,12 @@ pub extern "C" fn run_test_(rsp: u64) -> ! {
     test.state.rip = rip;
     test.state.gpr.rsp = rsp;
     test.state.flags.0 &= !INTERRUPT_FLAG_MASK;
+
+    // Diagnostic mode: provide XRSTOR with a canonical clean XSAVE area.
+    // Entire area is zeroed and header requests restoring only XMM (SSE) state.
+    test.state.avx.data.fill(0);
+    test.state.avx.data[XSAVE_HEADER_OFFSET..XSAVE_HEADER_OFFSET + 8]
+        .copy_from_slice(&XSTATE_BV_XMM.to_le_bytes());
 
     // Sets the registers
     // jump to rip
@@ -409,11 +424,22 @@ fn verify_cpu() {
     let has_sse2 = f1.has_sse2();
     let has_avx = f1.has_avx();
     let has_xsave = f1.has_xsave();
+    let has_osxsave = f1.has_oxsave();
+
+    let f7 = cpuid.get_extended_feature_info().unwrap();
+    let has_avx512f = f7.has_avx512f();
 
     println!("SSE: {}", has_sse && has_sse2);
     println!("AVX usable: {}", has_avx);
     println!("XSAVE: {}", has_xsave);
+    println!("AVX-512F: {}", has_avx512f);
+    println!("OSXSAVE: {}", has_osxsave);
 
-    // TODO: do something if this is not the case
-    assert!(has_sse && has_sse2 && has_avx && has_xsave);
+    println!("Cr0.TS: {}", Cr0::read().contains(Cr0Flags::TASK_SWITCHED));
+    println!(
+        "Cr0.EM: {}",
+        Cr0::read().contains(Cr0Flags::EMULATE_COPROCESSOR)
+    );
+
+    assert!(has_sse && has_sse2 && has_avx && has_xsave && has_avx512f && has_osxsave);
 }

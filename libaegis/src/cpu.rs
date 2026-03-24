@@ -204,6 +204,76 @@ impl Default for AvxState {
     }
 }
 
+impl AvxState {
+    // XSAVE area offsets (standard Intel layout)
+    const XMM_OFFSET: usize = 160; // legacy SSE: XMM part of zmm0-15 (16 bytes each)
+    const YMM_HI_OFFSET: usize = 576; // component 2: bits 128-255 of zmm0-15 (16 bytes each)
+    const ZMM_HI256_OFFSET: usize = 1152; // component 6: bits 256-511 of zmm0-15 (32 bytes each)
+    const HI16_ZMM_OFFSET: usize = 1664; // component 7: full zmm16-31 (64 bytes each)
+    const XSTATE_BV_OFFSET: usize = 512; // XSAVE header: XSTATE_BV field (u64)
+
+    /// Returns the full 128-bit value of XMM register `idx` (0-15).
+    pub fn get_xmm(&self, idx: usize) -> [u8; 16] {
+        assert!(idx < 16);
+        let mut out = [0u8; 16];
+        out.copy_from_slice(&self.data[Self::XMM_OFFSET + idx * 16..][..16]);
+        out
+    }
+
+    /// Writes 128 bits into XMM register `idx` (0-15) and marks the SSE
+    /// component in XSTATE_BV so XRSTOR restores the XMM state.
+    pub fn set_xmm(&mut self, idx: usize, val: &[u8; 16]) {
+        assert!(idx < 16);
+        let mut xstate_bv = u64::from_le_bytes(
+            self.data[Self::XSTATE_BV_OFFSET..Self::XSTATE_BV_OFFSET + 8]
+                .try_into()
+                .unwrap(),
+        );
+
+        self.data[Self::XMM_OFFSET + idx * 16..][..16].copy_from_slice(val);
+        xstate_bv |= 1 << 1; // SSE/XMM
+
+        self.data[Self::XSTATE_BV_OFFSET..Self::XSTATE_BV_OFFSET + 8]
+            .copy_from_slice(&xstate_bv.to_le_bytes());
+    }
+
+    /// Returns the full 512-bit value of ZMM register `idx` (0-31) as 64 bytes (little-endian).
+    pub fn get_zmm(&self, idx: usize) -> [u8; 64] {
+        assert!(idx < 32);
+        let mut out = [0u8; 64];
+        if idx < 16 {
+            out[..16].copy_from_slice(&self.data[Self::XMM_OFFSET + idx * 16..][..16]);
+            out[16..32].copy_from_slice(&self.data[Self::YMM_HI_OFFSET + idx * 16..][..16]);
+            out[32..64].copy_from_slice(&self.data[Self::ZMM_HI256_OFFSET + idx * 32..][..32]);
+        } else {
+            out.copy_from_slice(&self.data[Self::HI16_ZMM_OFFSET + (idx - 16) * 64..][..64]);
+        }
+        out
+    }
+
+    /// Writes 64 bytes into ZMM register `idx` (0-31) and marks the relevant XSAVE
+    /// components as valid in XSTATE_BV so XRSTOR will restore them.
+    pub fn set_zmm(&mut self, idx: usize, val: &[u8; 64]) {
+        assert!(idx < 32);
+        let mut xstate_bv = u64::from_le_bytes(
+            self.data[Self::XSTATE_BV_OFFSET..Self::XSTATE_BV_OFFSET + 8]
+                .try_into()
+                .unwrap(),
+        );
+        if idx < 16 {
+            self.data[Self::XMM_OFFSET + idx * 16..][..16].copy_from_slice(&val[..16]);
+            self.data[Self::YMM_HI_OFFSET + idx * 16..][..16].copy_from_slice(&val[16..32]);
+            self.data[Self::ZMM_HI256_OFFSET + idx * 32..][..32].copy_from_slice(&val[32..64]);
+            xstate_bv |= (1 << 1) | (1 << 2) | (1 << 6); // SSE | AVX | ZMM_HI256
+        } else {
+            self.data[Self::HI16_ZMM_OFFSET + (idx - 16) * 64..][..64].copy_from_slice(val);
+            xstate_bv |= (1 << 1) | (1 << 7); // SSE | HI16_ZMM
+        }
+        self.data[Self::XSTATE_BV_OFFSET..Self::XSTATE_BV_OFFSET + 8]
+            .copy_from_slice(&xstate_bv.to_le_bytes());
+    }
+}
+
 /// MMX registers in the x86-64 cpu
 #[repr(C)]
 #[derive(Debug, Default, Clone, PartialEq, Eq)]

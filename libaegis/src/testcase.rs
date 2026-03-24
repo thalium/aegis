@@ -89,8 +89,16 @@ impl TestCase {
 
         buff = self.state.to_bytes(buff)?;
 
+        if buff.len() < 16 {
+            return Err(());
+        }
+
         buff[..15].copy_from_slice(&self.insn);
         buff = &mut buff[15..];
+
+        if buff.is_empty() {
+            return Err(());
+        }
 
         buff[0] = self.size;
         buff = &mut buff[1..];

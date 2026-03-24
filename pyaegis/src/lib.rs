@@ -17,7 +17,45 @@ mod pyaegis {
         testcase::TestCase,
     };
 
-    use pyo3::{prelude::*, types::PyFunction, PyAny, Python};
+    use pyo3::{
+        exceptions::{PyTypeError, PyValueError},
+        prelude::*,
+        types::{PyBytes, PyFunction, PyInt},
+        PyAny, Python,
+    };
+
+    fn pyany_to_fixed_bytes<const N: usize>(
+        value: &Bound<'_, PyAny>,
+        reg: &str,
+    ) -> PyResult<[u8; N]> {
+        if let Ok(bytes) = value.extract::<Vec<u8>>() {
+            return bytes
+                .try_into()
+                .map_err(|_| PyValueError::new_err(format!("{reg} must be exactly {N} bytes")));
+        }
+
+        if value.is_instance_of::<PyInt>() {
+            let bytes = value
+                .call_method1("to_bytes", (N, "little"))?
+                .extract::<Vec<u8>>()?;
+
+            return bytes.try_into().map_err(|_| {
+                PyValueError::new_err(format!("{reg} conversion did not produce {N} bytes"))
+            });
+        }
+
+        Err(PyTypeError::new_err(format!(
+            "{reg} must be a Python int or bytes-like object"
+        )))
+    }
+
+    fn fixed_bytes_to_pyint(py: Python<'_>, bytes: &[u8]) -> PyResult<Py<PyAny>> {
+        let py_bytes = PyBytes::new(py, bytes);
+        let value = py
+            .get_type::<PyInt>()
+            .call_method1("from_bytes", (py_bytes, "little"))?;
+        Ok(value.unbind())
+    }
 
     #[pymodule_init]
     fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -31,7 +69,6 @@ mod pyaegis {
 
     #[pyclass]
     #[repr(transparent)]
-
     pub struct PyFlagState(FlagState);
 
     #[pymethods]
@@ -140,6 +177,90 @@ mod pyaegis {
         #[setter]
         fn set_mm7(&mut self, v: u64) {
             self.0.mmx.mm7 = v
+        }
+
+        // XMM registers (128-bit / 16 bytes each, xmm0-xmm15)
+        #[getter]
+        fn xmm0(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+            fixed_bytes_to_pyint(py, &self.0.avx.get_xmm(0))
+        }
+        #[setter]
+        fn set_xmm0(&mut self, v: &Bound<'_, PyAny>) -> PyResult<()> {
+            let bytes = pyany_to_fixed_bytes::<16>(v, "xmm0")?;
+            self.0.avx.set_xmm(0, &bytes);
+            Ok(())
+        }
+        #[getter]
+        fn xmm1(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+            fixed_bytes_to_pyint(py, &self.0.avx.get_xmm(1))
+        }
+        #[setter]
+        fn set_xmm1(&mut self, v: &Bound<'_, PyAny>) -> PyResult<()> {
+            let bytes = pyany_to_fixed_bytes::<16>(v, "xmm1")?;
+            self.0.avx.set_xmm(1, &bytes);
+            Ok(())
+        }
+        #[getter]
+        fn xmm2(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+            fixed_bytes_to_pyint(py, &self.0.avx.get_xmm(2))
+        }
+        #[setter]
+        fn set_xmm2(&mut self, v: &Bound<'_, PyAny>) -> PyResult<()> {
+            let bytes = pyany_to_fixed_bytes::<16>(v, "xmm2")?;
+            self.0.avx.set_xmm(2, &bytes);
+            Ok(())
+        }
+        #[getter]
+        fn xmm3(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+            fixed_bytes_to_pyint(py, &self.0.avx.get_xmm(3))
+        }
+        #[setter]
+        fn set_xmm3(&mut self, v: &Bound<'_, PyAny>) -> PyResult<()> {
+            let bytes = pyany_to_fixed_bytes::<16>(v, "xmm3")?;
+            self.0.avx.set_xmm(3, &bytes);
+            Ok(())
+        }
+
+        // ZMM registers (512-bit / 64 bytes each, zmm0-zmm31)
+        #[getter]
+        fn zmm0(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+            fixed_bytes_to_pyint(py, &self.0.avx.get_zmm(0))
+        }
+        #[setter]
+        fn set_zmm0(&mut self, v: &Bound<'_, PyAny>) -> PyResult<()> {
+            let bytes = pyany_to_fixed_bytes::<64>(v, "zmm0")?;
+            self.0.avx.set_zmm(0, &bytes);
+            Ok(())
+        }
+        #[getter]
+        fn zmm1(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+            fixed_bytes_to_pyint(py, &self.0.avx.get_zmm(1))
+        }
+        #[setter]
+        fn set_zmm1(&mut self, v: &Bound<'_, PyAny>) -> PyResult<()> {
+            let bytes = pyany_to_fixed_bytes::<64>(v, "zmm1")?;
+            self.0.avx.set_zmm(1, &bytes);
+            Ok(())
+        }
+        #[getter]
+        fn zmm2(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+            fixed_bytes_to_pyint(py, &self.0.avx.get_zmm(2))
+        }
+        #[setter]
+        fn set_zmm2(&mut self, v: &Bound<'_, PyAny>) -> PyResult<()> {
+            let bytes = pyany_to_fixed_bytes::<64>(v, "zmm2")?;
+            self.0.avx.set_zmm(2, &bytes);
+            Ok(())
+        }
+        #[getter]
+        fn zmm3(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+            fixed_bytes_to_pyint(py, &self.0.avx.get_zmm(3))
+        }
+        #[setter]
+        fn set_zmm3(&mut self, v: &Bound<'_, PyAny>) -> PyResult<()> {
+            let bytes = pyany_to_fixed_bytes::<64>(v, "zmm3")?;
+            self.0.avx.set_zmm(3, &bytes);
+            Ok(())
         }
 
         #[getter]
@@ -518,7 +639,12 @@ mod pyaegis {
             aegis.set_read_executor(move |test: Test| {
                 Python::attach(|py| {
                     let py_result = Py::new(py, PyTest(test)).unwrap();
-                    read.call1(py, (py_result,)).unwrap();
+                    read.call1(py, (py_result,))
+                        .inspect_err(|e| {
+                            e.display(py);
+                            panic!("Python error in read executor")
+                        })
+                        .unwrap();
                 })
             });
 
@@ -567,12 +693,9 @@ mod pyaegis {
                             if id > 1000 {
                                 return None;
                             }
-                            match make_test_case(&zero_state, id, insn, state) {
-                                Ok(test_case) => {
-                                    let name = insn.to_string();
-                                    return Some(NamedTestCase { name, test_case });
-                                }
-                                Err(()) => (),
+                            if let Ok(test_case) = make_test_case(&zero_state, id, insn, state) {
+                                let name = insn.to_string();
+                                return Some(NamedTestCase { name, test_case });
                             }
                         }
                     }),

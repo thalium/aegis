@@ -26,7 +26,7 @@ libaegis = { path = "../libaegis", features = [] }
 run-args = [
     "-enable-kvm",
     "-cpu",
-    "qemu64,kvm=on,+xsave,+avx",
+    "qemu64,kvm=on,+xsave,+avx,+avx512f,+avx512bw,+avx512dq,+avx512vl",
     "-device",
     "isa-debug-exit,iobase=0xf4,iosize=0x04",
     "-serial",
