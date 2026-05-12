@@ -480,7 +480,7 @@ impl Aegis {
                     )
                 }
             };
-            self.zero_state.rip -= insn_len;
+            // self.zero_state.rip -= insn_len;
         }
     }
 

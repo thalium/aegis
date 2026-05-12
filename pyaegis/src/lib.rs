@@ -113,6 +113,15 @@ mod pyaegis {
             PyCpuState(self.0.diff(&other.0))
         }
 
+        #[getter]
+        fn mem0_value(&self) -> u64 {
+            self.0.mem0
+        }
+        #[setter]
+        fn set_mem0_value(&mut self, v: u64) {
+            self.0.mem0 = v
+        }
+
         // MMX getters/setters
         #[getter]
         fn mm0(&self) -> u64 {
@@ -218,6 +227,168 @@ mod pyaegis {
         fn set_xmm3(&mut self, v: &Bound<'_, PyAny>) -> PyResult<()> {
             let bytes = pyany_to_fixed_bytes::<16>(v, "xmm3")?;
             self.0.avx.set_xmm(3, &bytes);
+            Ok(())
+        }
+
+        // YMM registers (256-bit / 32 bytes each, ymm0-ymm15)
+        #[getter]
+        fn ymm0(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+            fixed_bytes_to_pyint(py, &self.0.avx.get_ymm(0))
+        }
+        #[setter]
+        fn set_ymm0(&mut self, v: &Bound<'_, PyAny>) -> PyResult<()> {
+            let bytes = pyany_to_fixed_bytes::<32>(v, "ymm0")?;
+            self.0.avx.set_ymm(0, &bytes);
+            Ok(())
+        }
+        #[getter]
+        fn ymm1(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+            fixed_bytes_to_pyint(py, &self.0.avx.get_ymm(1))
+        }
+        #[setter]
+        fn set_ymm1(&mut self, v: &Bound<'_, PyAny>) -> PyResult<()> {
+            let bytes = pyany_to_fixed_bytes::<32>(v, "ymm1")?;
+            self.0.avx.set_ymm(1, &bytes);
+            Ok(())
+        }
+        #[getter]
+        fn ymm2(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+            fixed_bytes_to_pyint(py, &self.0.avx.get_ymm(2))
+        }
+        #[setter]
+        fn set_ymm2(&mut self, v: &Bound<'_, PyAny>) -> PyResult<()> {
+            let bytes = pyany_to_fixed_bytes::<32>(v, "ymm2")?;
+            self.0.avx.set_ymm(2, &bytes);
+            Ok(())
+        }
+        #[getter]
+        fn ymm3(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+            fixed_bytes_to_pyint(py, &self.0.avx.get_ymm(3))
+        }
+        #[setter]
+        fn set_ymm3(&mut self, v: &Bound<'_, PyAny>) -> PyResult<()> {
+            let bytes = pyany_to_fixed_bytes::<32>(v, "ymm3")?;
+            self.0.avx.set_ymm(3, &bytes);
+            Ok(())
+        }
+        #[getter]
+        fn ymm4(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+            fixed_bytes_to_pyint(py, &self.0.avx.get_ymm(4))
+        }
+        #[setter]
+        fn set_ymm4(&mut self, v: &Bound<'_, PyAny>) -> PyResult<()> {
+            let bytes = pyany_to_fixed_bytes::<32>(v, "ymm4")?;
+            self.0.avx.set_ymm(4, &bytes);
+            Ok(())
+        }
+        #[getter]
+        fn ymm5(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+            fixed_bytes_to_pyint(py, &self.0.avx.get_ymm(5))
+        }
+        #[setter]
+        fn set_ymm5(&mut self, v: &Bound<'_, PyAny>) -> PyResult<()> {
+            let bytes = pyany_to_fixed_bytes::<32>(v, "ymm5")?;
+            self.0.avx.set_ymm(5, &bytes);
+            Ok(())
+        }
+        #[getter]
+        fn ymm6(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+            fixed_bytes_to_pyint(py, &self.0.avx.get_ymm(6))
+        }
+        #[setter]
+        fn set_ymm6(&mut self, v: &Bound<'_, PyAny>) -> PyResult<()> {
+            let bytes = pyany_to_fixed_bytes::<32>(v, "ymm6")?;
+            self.0.avx.set_ymm(6, &bytes);
+            Ok(())
+        }
+        #[getter]
+        fn ymm7(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+            fixed_bytes_to_pyint(py, &self.0.avx.get_ymm(7))
+        }
+        #[setter]
+        fn set_ymm7(&mut self, v: &Bound<'_, PyAny>) -> PyResult<()> {
+            let bytes = pyany_to_fixed_bytes::<32>(v, "ymm7")?;
+            self.0.avx.set_ymm(7, &bytes);
+            Ok(())
+        }
+        #[getter]
+        fn ymm8(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+            fixed_bytes_to_pyint(py, &self.0.avx.get_ymm(8))
+        }
+        #[setter]
+        fn set_ymm8(&mut self, v: &Bound<'_, PyAny>) -> PyResult<()> {
+            let bytes = pyany_to_fixed_bytes::<32>(v, "ymm8")?;
+            self.0.avx.set_ymm(8, &bytes);
+            Ok(())
+        }
+        #[getter]
+        fn ymm9(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+            fixed_bytes_to_pyint(py, &self.0.avx.get_ymm(9))
+        }
+        #[setter]
+        fn set_ymm9(&mut self, v: &Bound<'_, PyAny>) -> PyResult<()> {
+            let bytes = pyany_to_fixed_bytes::<32>(v, "ymm9")?;
+            self.0.avx.set_ymm(9, &bytes);
+            Ok(())
+        }
+        #[getter]
+        fn ymm10(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+            fixed_bytes_to_pyint(py, &self.0.avx.get_ymm(10))
+        }
+        #[setter]
+        fn set_ymm10(&mut self, v: &Bound<'_, PyAny>) -> PyResult<()> {
+            let bytes = pyany_to_fixed_bytes::<32>(v, "ymm10")?;
+            self.0.avx.set_ymm(10, &bytes);
+            Ok(())
+        }
+        #[getter]
+        fn ymm11(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+            fixed_bytes_to_pyint(py, &self.0.avx.get_ymm(11))
+        }
+        #[setter]
+        fn set_ymm11(&mut self, v: &Bound<'_, PyAny>) -> PyResult<()> {
+            let bytes = pyany_to_fixed_bytes::<32>(v, "ymm11")?;
+            self.0.avx.set_ymm(11, &bytes);
+            Ok(())
+        }
+        #[getter]
+        fn ymm12(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+            fixed_bytes_to_pyint(py, &self.0.avx.get_ymm(12))
+        }
+        #[setter]
+        fn set_ymm12(&mut self, v: &Bound<'_, PyAny>) -> PyResult<()> {
+            let bytes = pyany_to_fixed_bytes::<32>(v, "ymm12")?;
+            self.0.avx.set_ymm(12, &bytes);
+            Ok(())
+        }
+        #[getter]
+        fn ymm13(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+            fixed_bytes_to_pyint(py, &self.0.avx.get_ymm(13))
+        }
+        #[setter]
+        fn set_ymm13(&mut self, v: &Bound<'_, PyAny>) -> PyResult<()> {
+            let bytes = pyany_to_fixed_bytes::<32>(v, "ymm13")?;
+            self.0.avx.set_ymm(13, &bytes);
+            Ok(())
+        }
+        #[getter]
+        fn ymm14(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+            fixed_bytes_to_pyint(py, &self.0.avx.get_ymm(14))
+        }
+        #[setter]
+        fn set_ymm14(&mut self, v: &Bound<'_, PyAny>) -> PyResult<()> {
+            let bytes = pyany_to_fixed_bytes::<32>(v, "ymm14")?;
+            self.0.avx.set_ymm(14, &bytes);
+            Ok(())
+        }
+        #[getter]
+        fn ymm15(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+            fixed_bytes_to_pyint(py, &self.0.avx.get_ymm(15))
+        }
+        #[setter]
+        fn set_ymm15(&mut self, v: &Bound<'_, PyAny>) -> PyResult<()> {
+            let bytes = pyany_to_fixed_bytes::<32>(v, "ymm15")?;
+            self.0.avx.set_ymm(15, &bytes);
             Ok(())
         }
 

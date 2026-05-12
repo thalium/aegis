@@ -8,8 +8,9 @@ use paste::paste;
 use raw_cpuid::CpuId;
 use x86_64::{
     VirtAddr,
+    instructions::hlt,
     registers::{
-        control::{Cr0, Cr0Flags, Cr4, Cr4Flags},
+        control::{Cr0, Cr0Flags, Cr2, Cr4, Cr4Flags},
         xcontrol::{XCr0, XCr0Flags},
     },
     structures::{
@@ -22,7 +23,7 @@ use crate::{
     kernel::{
         Kernel,
         interrupts::{
-            IDT, InterruptIndex, InterruptManager,
+            IDT, InterruptIndex, InterruptManager, UNIFIED_HANDLER,
             gdt::DOUBLE_FAULT_IST_INDEX,
             hardware::{PICS, pit_set_interval},
         },
@@ -33,6 +34,19 @@ use spin::Mutex;
 
 pub const ICE_START: usize = 0x_6666_6666_0000;
 pub const FIRE_START: usize = 0x_6666_6666_1000;
+
+pub const TEST_STACK_START: usize = 0x_6666_6600_0000;
+pub const TEST_STACK: usize = 0x_6666_6600_5fff;
+
+pub const MEM_ADDR: usize = 0x_6666_6601_0100;
+
+/// This needs to be aligned
+pub const CPU_DUMP_START: usize = 0x_5555_0000_0000;
+pub static DATASET: Mutex<Option<Box<dyn Dataset>>> = Mutex::new(None);
+pub static TEST_ID: Mutex<TestId> = Mutex::new(0);
+
+pub static TEST_INSN: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+pub static TEST_EXCEPTION: Mutex<Option<ExceptionKind>> = Mutex::new(None);
 
 /// Creates the ice and fire pages
 ///
@@ -60,6 +74,20 @@ pub fn create_ice_and_fire(kernel: &mut Kernel) -> Result<(), MapToError<Size4Ki
     let ice_page = kernel.memory_manager.map_addr(ice_start)?;
 
     // ------------------------
+    // Stack page: R/W
+    // ------------------------
+    // Allocate 5 pages for the test stack
+    let mut addr = TEST_STACK_START;
+    while addr < TEST_STACK {
+        let stack_page_start = VirtAddr::new(addr as u64);
+        kernel.memory_manager.map_addr(stack_page_start)?;
+        addr += 0x1000;
+    }
+
+    let stack_start = VirtAddr::new((MEM_ADDR as u64) & 0xffff_ffff_f000);
+    kernel.memory_manager.map_addr(stack_start)?;
+
+    // ------------------------
     // Map fire page normally first
     // ------------------------
     let fire_page: Page = ice_page + 1;
@@ -81,9 +109,6 @@ pub fn create_ice_and_fire(kernel: &mut Kernel) -> Result<(), MapToError<Size4Ki
     Ok(())
 }
 
-/// This needs to be aligned
-pub const CPU_DUMP_START: usize = 0x_5555_0000_0000;
-
 /// Create the CPU state huge page
 /// TODO: this won't work with concurency
 pub fn create_cpu_dump_pages(kernel: &mut Kernel) -> Result<(), MapToError<Size4KiB>> {
@@ -101,7 +126,7 @@ pub fn create_cpu_dump_pages(kernel: &mut Kernel) -> Result<(), MapToError<Size4
 
 /// Adds an instruction at the end of the ICE page and returns the address of this instruction
 pub fn set_ice_instruction(insn_buffer: &[u8]) -> VirtAddr {
-    let start = FIRE_START - insn_buffer.len() - 1;
+    let start = FIRE_START - insn_buffer.len();
 
     // Safety: ICE page needs to be initialized
     unsafe {
@@ -120,16 +145,6 @@ pub trait Dataset: Sync + Send {
     fn after_test(&mut self, id: TestId, state: &CpuState, exception: Option<ExceptionInfo>);
 }
 
-pub static DATASET: Mutex<Option<Box<dyn Dataset>>> = Mutex::new(None);
-pub static TEST_ID: Mutex<TestId> = Mutex::new(0);
-
-pub static TEST_INSN: Mutex<Vec<u8>> = Mutex::new(Vec::new());
-pub static TEST_EXCEPTION: Mutex<Option<ExceptionKind>> = Mutex::new(None);
-
-const INTERRUPT_FLAG_MASK: u64 = 1 << 9;
-const XSAVE_HEADER_OFFSET: usize = 512;
-const XSTATE_BV_XMM: u64 = 1 << 1;
-
 fn print_last_insn() {
     let s = TEST_INSN
         .lock()
@@ -146,13 +161,23 @@ fn mark_exception(kind: ExceptionKind) {
 
 // The custom page_fault_handler
 fn page_fault_handler(
-    state: &CpuState,
+    state: &mut CpuState,
     stack_frame: &InterruptStackFrame,
     error_code: PageFaultErrorCode,
     rip: &mut u64,
 ) {
-    if *rip < ICE_START as u64 || *rip > FIRE_START as u64 {
+    if *rip < ICE_START as u64 || *rip > (FIRE_START as u64 + 0x1000) {
         print_last_insn();
+
+        let fault_addr = Cr2::read();
+        let fault_rip = stack_frame.instruction_pointer.as_u64();
+
+        println!("PAGE FAULT");
+        println!("CR2 / accessed addr = {:#x}", fault_addr.as_u64());
+        println!("RIP / faulting instr = {:#x}", fault_rip);
+        println!("error code = {:?}", error_code);
+        println!("saved rip = {:#x}", state.rip);
+
         panic!(
             "Unexpected page fault while not in test area: {:?}",
             stack_frame
@@ -161,6 +186,8 @@ fn page_fault_handler(
 
     if error_code != PageFaultErrorCode::INSTRUCTION_FETCH {
         print_last_insn();
+        println!("Attempted to access address {:#x}", Cr2::read().as_u64());
+        hlt();
         mark_exception(ExceptionKind::PageFault);
         x86_64::instructions::interrupts::disable();
     }
@@ -181,13 +208,13 @@ pub extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptSta
 
 // Double fault handler
 pub fn double_fault_handler(
-    state: &CpuState,
+    state: &mut CpuState,
     stack_frame: &InterruptStackFrame,
     _error_code: PageFaultErrorCode,
     rip: &mut u64,
 ) {
     // Outside of the expected area
-    if *rip < ICE_START as u64 || *rip > FIRE_START as u64 {
+    if *rip < ICE_START as u64 || *rip > (FIRE_START as u64 + 0x1000) {
         print_last_insn();
         panic!("EXCEPTION: DOUBLE FAULT\n{:#?}", stack_frame);
     }
@@ -204,7 +231,9 @@ wrap!(raw_double_fault_handler, double_fault_handler);
 pub fn init_dataset(dataset: Box<dyn Dataset>) {
     // Enable the xsave instruction
     unsafe {
-        Cr4::update(|flags| *flags = flags.union(Cr4Flags::OSXSAVE | Cr4Flags::OSFXSR));
+        Cr4::update(|flags| {
+            *flags = flags.union(Cr4Flags::OSXSAVE | Cr4Flags::OSFXSR | Cr4Flags::OSXMMEXCPT_ENABLE)
+        });
         XCr0::write(
             XCr0Flags::X87
                 | XCr0Flags::SSE
@@ -224,11 +253,9 @@ pub fn init_dataset(dataset: Box<dyn Dataset>) {
     // Set the timer frequency
     pit_set_interval(1);
 
-    // Sets the page fault handler
+    // Sets the generic handler
     unsafe {
-        IDT.lock()
-            .page_fault
-            .set_handler_addr(VirtAddr::new(raw_page_fault_handler as *const () as u64));
+        UNIFIED_HANDLER = exception_handler;
     }
 
     // Sets the double fault handler
@@ -255,7 +282,7 @@ pub fn init_dataset(dataset: Box<dyn Dataset>) {
 #[unsafe(no_mangle)]
 pub extern "C" fn run_naked_test() {
     // Pop the return address too
-    core::arch::naked_asm!("mov rdi, rsp", "call {run_test_}", run_test_ = sym run_test_)
+    core::arch::naked_asm!("mov rdi, rsp", "jmp {run_test_}", run_test_ = sym run_test_)
 }
 
 #[doc(hidden)]
@@ -274,123 +301,141 @@ pub extern "C" fn run_test_(rsp: u64) -> ! {
     *TEST_ID.lock() = test.id;
     *TEST_EXCEPTION.lock() = None;
 
-    // Write the instruction
-
     // Save the instruction for error logging
     *TEST_INSN.lock() = test.insn[..test.size as usize].to_vec();
 
     let rip = set_ice_instruction(&test.insn[..test.size as usize]).as_u64();
     test.state.rip = rip;
-    test.state.gpr.rsp = rsp;
-    test.state.flags.0 &= !INTERRUPT_FLAG_MASK;
 
-    // Diagnostic mode: provide XRSTOR with a canonical clean XSAVE area.
-    // Entire area is zeroed and header requests restoring only XMM (SSE) state.
-    test.state.avx.data.fill(0);
-    test.state.avx.data[XSAVE_HEADER_OFFSET..XSAVE_HEADER_OFFSET + 8]
-        .copy_from_slice(&XSTATE_BV_XMM.to_le_bytes());
+    unsafe {
+        *(MEM_ADDR as *mut u64) = test.state.mem0;
+    }
 
-    // Sets the registers
-    // jump to rip
+    // test.state.flags.0 &= !INTERRUPT_FLAG_MASK;
+
     unsafe {
         core::arch::asm!(
-        // Move CPUState pointer into rdi
-        "mov rdi, {CPU_DUMP_ADDR}",
+            /*
+                r15 = CpuState pointer.
+                Keep this until the very end.
+            */
+            "mov r15, {CPU_DUMP_ADDR}",
 
-        // Restore AVX registers
-        "mov eax, 0xFFFFFFFF",
-        "mov edx, 0xFFFFFFFF",
-        "xrstor [rdi + {OFFSET_AVX}]",
+            /*
+                Build an iretq frame on the target stack.
 
-        // Restore most general purpose registers
-        "mov rax, [rdi + {OFFSET_RAX}]",
-        "mov rbx, [rdi + {OFFSET_RBX}]",
-        "mov rcx, [rdi + {OFFSET_RCX}]",
-        "mov rdx, [rdi + {OFFSET_RDX}]",
-        "mov rsi, [rdi + {OFFSET_RSI}]",
-        "mov rbp, [rdi + {OFFSET_RBP}]",
-        "mov rsp, [rdi + {OFFSET_RSP}]",
-        "mov r8,  [rdi + {OFFSET_R8}]",
-        "mov r9,  [rdi + {OFFSET_R9}]",
-        "mov r10, [rdi + {OFFSET_R10}]",
-        "mov r11, [rdi + {OFFSET_R11}]",
-        "mov r12, [rdi + {OFFSET_R12}]",
-        "mov r13, [rdi + {OFFSET_R13}]",
-        "mov r14, [rdi + {OFFSET_R14}]",
-        // "mov r15, [rdi + {OFFSET_R15}]",
+                We want final RSP to equal CpuState.rsp after iretq.
 
-        // Restore MMX registers
-        "movq mm0, [rdi + {OFFSET_MM0}]",
-        "movq mm1, [rdi + {OFFSET_MM1}]",
-        "movq mm2, [rdi + {OFFSET_MM2}]",
-        "movq mm3, [rdi + {OFFSET_MM3}]",
-        "movq mm4, [rdi + {OFFSET_MM4}]",
-        "movq mm5, [rdi + {OFFSET_MM5}]",
-        "movq mm6, [rdi + {OFFSET_MM6}]",
-        "movq mm7, [rdi + {OFFSET_MM7}]",
+                Layout required by iretq, same privilege level:
 
-        // Restore segment registers
-        // "mov cs, [rdi + {OFFSET_CS}]",
-        "mov ds, [rdi + {OFFSET_DS}]",
-        "mov es, [rdi + {OFFSET_ES}]",
-        "mov fs, [rdi + {OFFSET_FS}]",
-        "mov gs, [rdi + {OFFSET_GS}]",
-        "mov ss, [rdi + {OFFSET_SS}]",
+                    rsp + 0x00 = rip
+                    rsp + 0x08 = cs
+                    rsp + 0x10 = rflags
 
-        // Restore flags
-        "mov r15, [rdi + {OFFSET_FLAGS}]",
-        "push r15",
-        "popfq",
+                Therefore set temporary rsp to target_rsp - 24.
+            */
+            // "mov rax, rsp",
+            "mov rax, {TEST_STACK}",
+            "sub rax, 40",
 
-        // Restore rdi
-        "mov r15, rdi",
-        "mov rdi, [r15 + {OFFSET_RDI}]",
+            "mov rcx, [r15 + {OFFSET_RIP}]",
+            "mov qword ptr [rax + 0x00], rcx",
 
-        "mov r15, [r15 + {OFFSET_RIP}]",
-        "jmp r15",
+            "xor rcx, rcx",
+            "mov cx, cs",
+            "mov qword ptr [rax + 0x08], rcx",
 
+            "mov rcx, [r15 + {OFFSET_FLAGS}]",
+            "mov qword ptr [rax + 0x10], rcx",
 
-        CPU_DUMP_ADDR = in(reg) &test.state,
-        OFFSET_RAX = const OFFSET_RAX,
-        OFFSET_RBX = const OFFSET_RBX,
-        OFFSET_RCX = const OFFSET_RCX,
-        OFFSET_RDX = const OFFSET_RDX,
-        OFFSET_RSI = const OFFSET_RSI,
-        OFFSET_RDI = const OFFSET_RDI,
-        OFFSET_RIP = const OFFSET_RIP,
-        OFFSET_RBP = const OFFSET_RBP,
-        OFFSET_RSP = const OFFSET_RSP,
-        OFFSET_R8 = const OFFSET_R8,
-        OFFSET_R9 = const OFFSET_R9,
-        OFFSET_R10 = const OFFSET_R10,
-        OFFSET_R11 = const OFFSET_R11,
-        OFFSET_R12 = const OFFSET_R12,
-        OFFSET_R13 = const OFFSET_R13,
-        OFFSET_R14 = const OFFSET_R14,
-        // OFFSET_R15 = const OFFSET_R15,
-        OFFSET_FLAGS = const OFFSET_FLAGS,
-        // OFFSET_CS = const OFFSET_CS,
-        OFFSET_DS = const OFFSET_DS,
-        OFFSET_ES = const OFFSET_ES,
-        OFFSET_FS = const OFFSET_FS,
-        OFFSET_GS = const OFFSET_GS,
-        OFFSET_SS = const OFFSET_SS,
-        OFFSET_MM0 = const OFFSET_MM0,
-        OFFSET_MM1 = const OFFSET_MM1,
-        OFFSET_MM2 = const OFFSET_MM2,
-        OFFSET_MM3 = const OFFSET_MM3,
-        OFFSET_MM4 = const OFFSET_MM4,
-        OFFSET_MM5 = const OFFSET_MM5,
-        OFFSET_MM6 = const OFFSET_MM6,
-        OFFSET_MM7 = const OFFSET_MM7,
-        OFFSET_AVX = const OFFSET_AVX,
-                options(noreturn)
-            );
+            "mov rcx, [r15 + {OFFSET_RSP}]",
+            "mov qword ptr [rax + 0x18], rcx",
+
+            "xor rcx, rcx",
+            "mov cx, ss",
+            "mov qword ptr [rax + 0x20], rcx",
+
+            /*
+                Save final iretq-frame pointer in r14.
+                r14 will be restored later, right before r15.
+            */
+            "mov r14, rax",
+
+            /*
+                Restore most GPRs.
+                Do not restore r14/r15 yet:
+                - r15 is still the CpuState pointer
+                - r14 holds the final iretq frame pointer
+            */
+            "mov rax, [r15 + {OFFSET_RAX}]",
+            "mov rbx, [r15 + {OFFSET_RBX}]",
+            "mov rcx, [r15 + {OFFSET_RCX}]",
+            "mov rdx, [r15 + {OFFSET_RDX}]",
+            "mov rsi, [r15 + {OFFSET_RSI}]",
+            "mov rdi, [r15 + {OFFSET_RDI}]",
+            "mov rbp, [r15 + {OFFSET_RBP}]",
+
+            "mov r8,  [r15 + {OFFSET_R8}]",
+            "mov r9,  [r15 + {OFFSET_R9}]",
+            "mov r10, [r15 + {OFFSET_R10}]",
+            "mov r11, [r15 + {OFFSET_R11}]",
+            "mov r12, [r15 + {OFFSET_R12}]",
+            "mov r13, [r15 + {OFFSET_R13}]",
+
+            /*
+                Switch to the artificial iretq frame.
+                After this, do not touch memory through rsp except via iretq.
+            */
+            "mov rsp, r14",
+
+            /*
+                Restore r14 and r15 last.
+                r15 is still usable as CpuState pointer until the second instruction.
+            */
+            "mov r14, [r15 + {OFFSET_R14}]",
+            "mov r15, [r15 + {OFFSET_R15}]",
+
+            /*
+                Restores RIP, CS, RFLAGS, and final RSP.
+            */
+            "iretq",
+
+            CPU_DUMP_ADDR = in(reg) &test.state,
+
+            // OFFSET_AVX = const OFFSET_AVX,
+
+            OFFSET_RIP = const OFFSET_RIP,
+            OFFSET_FLAGS = const OFFSET_FLAGS,
+
+            OFFSET_RAX = const OFFSET_RAX,
+            OFFSET_RBX = const OFFSET_RBX,
+            OFFSET_RCX = const OFFSET_RCX,
+            OFFSET_RDX = const OFFSET_RDX,
+            OFFSET_RSI = const OFFSET_RSI,
+            OFFSET_RDI = const OFFSET_RDI,
+            OFFSET_RBP = const OFFSET_RBP,
+            OFFSET_RSP = const OFFSET_RSP,
+
+            OFFSET_R8 = const OFFSET_R8,
+            OFFSET_R9 = const OFFSET_R9,
+            OFFSET_R10 = const OFFSET_R10,
+            OFFSET_R11 = const OFFSET_R11,
+            OFFSET_R12 = const OFFSET_R12,
+            OFFSET_R13 = const OFFSET_R13,
+            OFFSET_R14 = const OFFSET_R14,
+            OFFSET_R15 = const OFFSET_R15,
+            TEST_STACK = const TEST_STACK,
+
+            options(noreturn)
+        );
     };
 }
 
-pub fn landing_pad(state: &CpuState) {
+pub fn landing_pad(state: &mut CpuState) {
     x86_64::instructions::interrupts::disable();
+
+    // Read the memory value
+    state.mem0 = unsafe { *(MEM_ADDR as *const u64) };
 
     let exception = TEST_EXCEPTION.lock().take();
     let exception = exception.map(|kind| {
@@ -431,6 +476,7 @@ fn verify_cpu() {
 
     println!("SSE: {}", has_sse && has_sse2);
     println!("AVX usable: {}", has_avx);
+    println!("AVX512ER usable: {}", f7.has_avx512er());
     println!("XSAVE: {}", has_xsave);
     println!("AVX-512F: {}", has_avx512f);
     println!("OSXSAVE: {}", has_osxsave);

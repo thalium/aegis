@@ -13,6 +13,7 @@ from tqdm import tqdm
 SERIAL_SOCK = "/tmp/serial.sock"
 SHARED_MEM = "/dev/shm/ivshmem"
 
+INGNORE_COMPLETED = False
 BATCH_SIZE = 32
 
 DSN = os.environ.get("X86DB_DSN", "postgresql://x86db:x86db@localhost:5432/x86db")
@@ -49,11 +50,11 @@ def iter_test_specs_from_db(dsn: str) -> Iterator[dict]:
     print(f"Found {len(completed)} completed test states")
 
     for tc in iter_test_cases(dsn, where=AVX_WHERE, batch_size=BATCH_SIZE):
-        print(f"Processing test case {tc.id} with {len(tc.initial_states)} states")
+        # print(f"Processing test case {tc.id} with {len(tc.initial_states)} states")
 
         encoding = bytes.fromhex(tc.opcode)
         for state_index, cpu_state in enumerate(tc.initial_states):
-            if (tc.id, state_index) not in completed:
+            if INGNORE_COMPLETED or ((tc.id, state_index) not in completed):
                 yield {
                     "test_case_id": tc.id,
                     "state_index": state_index,
@@ -63,6 +64,13 @@ def iter_test_specs_from_db(dsn: str) -> Iterator[dict]:
                 }
 
 
+def _reg_mask(key: str) -> int:
+    for prefix, width in VECTOR_PREFIX_WIDTHS.items():
+        if key.startswith(prefix):
+            return (1 << (width * 8)) - 1
+    return REG_VALUE_MASK
+
+
 def apply_state(cpu_state: PyCpuState, state_data: dict[str, int]) -> list[str]:
     reg_keys: list[str] = []
     for key, value in state_data.items():
@@ -70,7 +78,7 @@ def apply_state(cpu_state: PyCpuState, state_data: dict[str, int]) -> list[str]:
             cpu_state.flags = value & REG_VALUE_MASK
             continue
 
-        setattr(cpu_state, key, value & REG_VALUE_MASK)
+        setattr(cpu_state, key, value & _reg_mask(key))
         reg_keys.append(key)
 
     return reg_keys
@@ -81,7 +89,7 @@ def serialize_state(cpu_state: PyCpuState, reg_keys: list[str]) -> dict[str, obj
     state_dict: dict[str, object] = {}
     for reg in keys:
         value = getattr(cpu_state, reg)
-        state_dict[reg] = int(value) & REG_VALUE_MASK
+        state_dict[reg] = int(value) & _reg_mask(reg)
 
     state_dict["flag"] = int(cpu_state.flags.value) & REG_VALUE_MASK
     return state_dict

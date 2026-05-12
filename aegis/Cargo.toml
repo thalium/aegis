@@ -26,7 +26,7 @@ libaegis = { path = "../libaegis", features = [] }
 run-args = [
     "-enable-kvm",
     "-cpu",
-    "qemu64,kvm=on,+xsave,+avx,+avx512f,+avx512bw,+avx512dq,+avx512vl",
+    "host,kvm=on,+xsave,+avx,+avx512f,+avx512bw,+avx512dq,+avx512vl,+bmi1,+bmi2",
     "-device",
     "isa-debug-exit,iobase=0xf4,iosize=0x04",
     "-serial",
@@ -35,6 +35,8 @@ run-args = [
     "ivshmem-plain,memdev=ivmem",
     "-object",
     "memory-backend-file,id=ivmem,share=on,mem-path=/dev/shm/ivshmem,size=16M",
+    # "-S",
+    # "-s",
 ]
 
 test-args = [

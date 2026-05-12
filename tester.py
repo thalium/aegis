@@ -36,7 +36,7 @@ def iter_test_specs_from_db(dsn: str) -> Iterator[dict]:
     for tc in iter_test_cases(dsn):
         encoding = bytes.fromhex(tc.opcode)
         for state_index, cpu_state in enumerate(tc.initial_states):
-            if (tc.id, state_index) not in completed:
+            if ((tc.id, state_index) not in completed) and ("enter" not in tc.opcode):
                 yield {
                     "test_case_id": tc.id,
                     "state_index": state_index,
@@ -159,13 +159,11 @@ def main():
     db_con = open_db(DSN)
 
     with db_con.cursor() as cur:
-        cur.execute(
-            """
+        cur.execute("""
             SELECT
                 (SELECT SUM(jsonb_array_length(initial_states)) FROM test_cases) -
                 (SELECT COUNT(*) FROM test_results)
-        """
-        )
+        """)
         total = cur.fetchone()[0]
 
     test_iter = cast(
