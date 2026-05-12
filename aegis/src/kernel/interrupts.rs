@@ -1,13 +1,17 @@
 use crate::{
+    hlt_loop,
     kernel::interrupts::hardware::{PICS, keyboard_interrupt_handler, timer_interrupt_handler},
+    println,
     testing::harness::CPU_DUMP_START,
 };
-use core::fmt::Display;
-use libaegis::cpu::{
-    CpuState, OFFSET_CS, OFFSET_DS, OFFSET_ES, OFFSET_FLAGS, OFFSET_FS, OFFSET_GS, OFFSET_R8,
-    OFFSET_R9, OFFSET_R10, OFFSET_R11, OFFSET_R12, OFFSET_R13, OFFSET_R14, OFFSET_R15, OFFSET_RAX,
-    OFFSET_RBP, OFFSET_RBX, OFFSET_RCX, OFFSET_RDI, OFFSET_RDX, OFFSET_RIP, OFFSET_RSI, OFFSET_RSP,
-    OFFSET_SS,
+use libaegis::{
+    cpu::{
+        CpuState, OFFSET_CS, OFFSET_DS, OFFSET_ES, OFFSET_FLAGS, OFFSET_FS, OFFSET_GS, OFFSET_R8,
+        OFFSET_R9, OFFSET_R10, OFFSET_R11, OFFSET_R12, OFFSET_R13, OFFSET_R14, OFFSET_R15,
+        OFFSET_RAX, OFFSET_RBP, OFFSET_RBX, OFFSET_RCX, OFFSET_RDI, OFFSET_RDX, OFFSET_RIP,
+        OFFSET_RSI, OFFSET_RSP, OFFSET_SS,
+    },
+    testcase::ExceptionVector,
 };
 use spin::Mutex;
 use x86_64::{
@@ -47,7 +51,7 @@ pub type UnifiedHandler =
     fn(exception: ExceptionVector, stack_frame: InterruptStackFrame, error_code: Option<u64>);
 
 pub type ExceptionHandler = fn(
-    cpu_state: &CpuState,
+    cpu_state: &mut CpuState,
     stack_frame: &mut InterruptStackFrame,
     error_code: Option<u64>,
     vector: ExceptionVector,
@@ -61,7 +65,7 @@ pub type ExceptionHandler = fn(
 pub static mut UNIFIED_HANDLER: ExceptionHandler = default_handler;
 
 fn default_handler(
-    _cpu_state: &CpuState,
+    _cpu_state: &mut CpuState,
     stack_frame: &mut InterruptStackFrame,
     error_code: Option<u64>,
     vector: ExceptionVector,
@@ -70,8 +74,8 @@ fn default_handler(
 }
 
 #[unsafe(no_mangle)]
-pub extern "sysv64" fn handler_trampoline(
-    cpu_state: *const CpuState,
+pub unsafe extern "sysv64" fn handler_trampoline(
+    cpu_state: *mut CpuState,
     stack_frame: *mut InterruptStackFrame,
     error_code: u64,
     vector: u64,
@@ -88,7 +92,7 @@ pub extern "sysv64" fn handler_trampoline(
 
     unsafe {
         UNIFIED_HANDLER(
-            &*cpu_state,
+            &mut *cpu_state,
             &mut *stack_frame,
             error_code_opt,
             exception_vector,
@@ -194,162 +198,17 @@ impl InterruptManager {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub enum ExceptionVector {
-    /// Error during Division
-    Division = 0x00,
-
-    /// Debug
-    Debug = 0x01,
-
-    /// Non-Maskable Interrupt
-    NonMaskableInterrupt = 0x02,
-
-    /// Breakpoint
-    Breakpoint = 0x03,
-
-    /// Overflow
-    Overflow = 0x04,
-
-    /// Bound Range Exceeded
-    BoundRange = 0x05,
-
-    /// Invalid Opcode
-    InvalidOpcode = 0x06,
-
-    /// Device Not Available
-    DeviceNotAvailable = 0x07,
-
-    /// Double Fault
-    Double = 0x08,
-
-    /// Invalid TSS
-    InvalidTss = 0x0A,
-
-    /// Segment Not Present
-    SegmentNotPresent = 0x0B,
-
-    /// Stack Fault
-    Stack = 0x0C,
-
-    /// General Protection Fault
-    GeneralProtection = 0x0D,
-
-    /// Page Fault
-    Page = 0x0E,
-
-    /// x87 Floating-Point Exception
-    X87FloatingPoint = 0x10,
-
-    /// Alignment Check
-    AlignmentCheck = 0x11,
-
-    /// Machine Check
-    MachineCheck = 0x12,
-
-    /// SIMD Floating-Point Exception
-    SimdFloatingPoint = 0x13,
-
-    /// Virtualization Exception (Intel-only)
-    Virtualization = 0x14,
-
-    /// Control Protection Exception
-    ControlProtection = 0x15,
-
-    /// Hypervisor Injection (AMD-only)
-    HypervisorInjection = 0x1C,
-
-    /// VMM Communication (AMD-only)
-    VmmCommunication = 0x1D,
-
-    /// Security Exception
-    Security = 0x1E,
-
-    /// Unknown Exception
-    Unknown = 0xFF,
-}
-
-impl Into<u8> for ExceptionVector {
-    fn into(self) -> u8 {
-        self as u8
-    }
-}
-
-impl TryFrom<u8> for ExceptionVector {
-    type Error = ();
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            0x00 => Ok(ExceptionVector::Division),
-            0x01 => Ok(ExceptionVector::Debug),
-            0x02 => Ok(ExceptionVector::NonMaskableInterrupt),
-            0x03 => Ok(ExceptionVector::Breakpoint),
-            0x04 => Ok(ExceptionVector::Overflow),
-            0x05 => Ok(ExceptionVector::BoundRange),
-            0x06 => Ok(ExceptionVector::InvalidOpcode),
-            0x07 => Ok(ExceptionVector::DeviceNotAvailable),
-            0x08 => Ok(ExceptionVector::Double),
-            0x0A => Ok(ExceptionVector::InvalidTss),
-            0x0B => Ok(ExceptionVector::SegmentNotPresent),
-            0x0C => Ok(ExceptionVector::Stack),
-            0x0D => Ok(ExceptionVector::GeneralProtection),
-            0x0E => Ok(ExceptionVector::Page),
-            0x10 => Ok(ExceptionVector::X87FloatingPoint),
-            0x11 => Ok(ExceptionVector::AlignmentCheck),
-            0x12 => Ok(ExceptionVector::MachineCheck),
-            0x13 => Ok(ExceptionVector::SimdFloatingPoint),
-            0x14 => Ok(ExceptionVector::Virtualization),
-            0x15 => Ok(ExceptionVector::ControlProtection),
-            0x1C => Ok(ExceptionVector::HypervisorInjection),
-            0x1D => Ok(ExceptionVector::VmmCommunication),
-            0x1E => Ok(ExceptionVector::Security),
-            _ => Err(()),
-        }
-    }
-}
-
-impl Display for ExceptionVector {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let name = match self {
-            ExceptionVector::Division => "Division Error",
-            ExceptionVector::Debug => "Debug",
-            ExceptionVector::NonMaskableInterrupt => "Non-Maskable Interrupt",
-            ExceptionVector::Breakpoint => "Breakpoint",
-            ExceptionVector::Overflow => "Overflow",
-            ExceptionVector::BoundRange => "Bound Range Exceeded",
-            ExceptionVector::InvalidOpcode => "Invalid Opcode",
-            ExceptionVector::DeviceNotAvailable => "Device Not Available",
-            ExceptionVector::Double => "Double Fault",
-            ExceptionVector::InvalidTss => "Invalid TSS",
-            ExceptionVector::SegmentNotPresent => "Segment Not Present",
-            ExceptionVector::Stack => "Stack Fault",
-            ExceptionVector::GeneralProtection => "General Protection Fault",
-            ExceptionVector::Page => "Page Fault",
-            ExceptionVector::X87FloatingPoint => "x87 Floating-Point Exception",
-            ExceptionVector::AlignmentCheck => "Alignment Check",
-            ExceptionVector::MachineCheck => "Machine Check",
-            ExceptionVector::SimdFloatingPoint => "SIMD Floating-Point Exception",
-            ExceptionVector::Virtualization => "Virtualization Exception",
-            ExceptionVector::ControlProtection => "Control Protection Exception",
-            ExceptionVector::HypervisorInjection => "Hypervisor Injection (AMD-only)",
-            ExceptionVector::VmmCommunication => "VMM Communication (AMD-only)",
-            ExceptionVector::Security => "Security Exception",
-            ExceptionVector::Unknown => "Unknown Exception",
-        };
-        write!(f, "{name}")
-    }
-}
-
 pub extern "x86-interrupt" fn double_fault_handler(
     stack_frame: InterruptStackFrame,
     _error_code: u64,
 ) -> ! {
-    panic!("EXCEPTION: DOUBLE FAULT\n{:#?}", stack_frame);
+    println!("EXCEPTION: DOUBLE FAULT\n{:#?}", stack_frame);
+    hlt_loop();
 }
 
 #[unsafe(naked)]
 #[doc(hidden)]
-pub extern "C" fn error_handler<const HasErrorCode: bool, const VECTOR: u8>() {
+pub extern "C" fn error_handler<const HAS_ERROR_CODE: bool, const VECTOR: u8>() {
     core::arch::naked_asm!(
         /*
             Error-code exception entry stack in x86-64 long mode:
@@ -372,10 +231,15 @@ pub extern "C" fn error_handler<const HasErrorCode: bool, const VECTOR: u8>() {
             In that case, we synthesize an error code of 0 by pushing it
             ourselves.
         */
-        "cmp {HAS_ERROR_CODE}, 0",
+        "push rax",
+        "mov rax, {HAS_ERROR_CODE}",
+        "cmp rax, 0",
         "jne 2f",
+            "pop rax",
             "push 0",
+            "push rax",
         "2:",
+        "pop rax",
 
 
         /*
@@ -552,8 +416,7 @@ pub extern "C" fn error_handler<const HasErrorCode: bool, const VECTOR: u8>() {
         "sub rsp, 16",
         "mov [rsp], r11",
 
-        "mov rax, [rip + {handler_slot}]",
-        "call rax",
+        "call {handler_trampoline}",
 
         /*
             Restore saved-frame rsp.
@@ -627,9 +490,9 @@ pub extern "C" fn error_handler<const HasErrorCode: bool, const VECTOR: u8>() {
         OFFSET_GS = const OFFSET_GS,
         OFFSET_SS = const OFFSET_SS,
         VECTOR = const VECTOR,
-        HAS_ERROR_CODE = const HasErrorCode as u8,
+        HAS_ERROR_CODE = const HAS_ERROR_CODE as u8,
 
-        handler_slot = sym UNIFIED_HANDLER,
+        handler_trampoline = sym handler_trampoline,
         options()
     );
 }

@@ -3,54 +3,168 @@ extern crate core;
 
 #[cfg(not(feature = "std"))]
 use core::mem::MaybeUninit;
-
 #[cfg(feature = "std")]
 use std::mem::MaybeUninit;
+
+#[cfg(not(feature = "std"))]
+use core::fmt::Display;
+
+#[cfg(feature = "std")]
+use std::fmt::Display;
 
 use crate::{compressible::Compressible, cpu::CpuState};
 
 pub type TestId = usize;
 
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExceptionKind {
-    Unknown = 0,
-    PageFault = 1,
-    DoubleFault = 2,
-    GeneralProtection = 3,
-    InvalidOpcode = 4,
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ExceptionVector {
+    /// Error during Division
+    Division = 0x00,
+
+    /// Debug
+    Debug = 0x01,
+
+    /// Non-Maskable Interrupt
+    NonMaskableInterrupt = 0x02,
+
+    /// Breakpoint
+    Breakpoint = 0x03,
+
+    /// Overflow
+    Overflow = 0x04,
+
+    /// Bound Range Exceeded
+    BoundRange = 0x05,
+
+    /// Invalid Opcode
+    InvalidOpcode = 0x06,
+
+    /// Device Not Available
+    DeviceNotAvailable = 0x07,
+
+    /// Double Fault
+    Double = 0x08,
+
+    /// Invalid TSS
+    InvalidTss = 0x0A,
+
+    /// Segment Not Present
+    SegmentNotPresent = 0x0B,
+
+    /// Stack Fault
+    Stack = 0x0C,
+
+    /// General Protection Fault
+    GeneralProtection = 0x0D,
+
+    /// Page Fault
+    Page = 0x0E,
+
+    /// x87 Floating-Point Exception
+    X87FloatingPoint = 0x10,
+
+    /// Alignment Check
+    AlignmentCheck = 0x11,
+
+    /// Machine Check
+    MachineCheck = 0x12,
+
+    /// SIMD Floating-Point Exception
+    SimdFloatingPoint = 0x13,
+
+    /// Virtualization Exception (Intel-only)
+    Virtualization = 0x14,
+
+    /// Control Protection Exception
+    ControlProtection = 0x15,
+
+    /// Hypervisor Injection (AMD-only)
+    HypervisorInjection = 0x1C,
+
+    /// VMM Communication (AMD-only)
+    VmmCommunication = 0x1D,
+
+    /// Security Exception
+    Security = 0x1E,
+
+    /// Unknown Exception
+    Unknown = 0xFF,
 }
 
-impl ExceptionKind {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Unknown => "Unknown",
-            Self::PageFault => "PageFault",
-            Self::DoubleFault => "DoubleFault",
-            Self::GeneralProtection => "GeneralProtection",
-            Self::InvalidOpcode => "InvalidOpcode",
-        }
+impl From<ExceptionVector> for u8 {
+    fn from(val: ExceptionVector) -> Self {
+        val as u8
     }
 }
 
-impl TryFrom<u8> for ExceptionKind {
+impl TryFrom<u8> for ExceptionVector {
     type Error = ();
 
-    fn try_from(v: u8) -> Result<Self, Self::Error> {
-        match v {
-            0 => Ok(Self::Unknown),
-            1 => Ok(Self::PageFault),
-            2 => Ok(Self::DoubleFault),
-            3 => Ok(Self::GeneralProtection),
-            4 => Ok(Self::InvalidOpcode),
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0x00 => Ok(ExceptionVector::Division),
+            0x01 => Ok(ExceptionVector::Debug),
+            0x02 => Ok(ExceptionVector::NonMaskableInterrupt),
+            0x03 => Ok(ExceptionVector::Breakpoint),
+            0x04 => Ok(ExceptionVector::Overflow),
+            0x05 => Ok(ExceptionVector::BoundRange),
+            0x06 => Ok(ExceptionVector::InvalidOpcode),
+            0x07 => Ok(ExceptionVector::DeviceNotAvailable),
+            0x08 => Ok(ExceptionVector::Double),
+            0x0A => Ok(ExceptionVector::InvalidTss),
+            0x0B => Ok(ExceptionVector::SegmentNotPresent),
+            0x0C => Ok(ExceptionVector::Stack),
+            0x0D => Ok(ExceptionVector::GeneralProtection),
+            0x0E => Ok(ExceptionVector::Page),
+            0x10 => Ok(ExceptionVector::X87FloatingPoint),
+            0x11 => Ok(ExceptionVector::AlignmentCheck),
+            0x12 => Ok(ExceptionVector::MachineCheck),
+            0x13 => Ok(ExceptionVector::SimdFloatingPoint),
+            0x14 => Ok(ExceptionVector::Virtualization),
+            0x15 => Ok(ExceptionVector::ControlProtection),
+            0x1C => Ok(ExceptionVector::HypervisorInjection),
+            0x1D => Ok(ExceptionVector::VmmCommunication),
+            0x1E => Ok(ExceptionVector::Security),
             _ => Err(()),
         }
     }
 }
 
+impl Display for ExceptionVector {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let name = match self {
+            ExceptionVector::Division => "Division Error",
+            ExceptionVector::Debug => "Debug",
+            ExceptionVector::NonMaskableInterrupt => "Non-Maskable Interrupt",
+            ExceptionVector::Breakpoint => "Breakpoint",
+            ExceptionVector::Overflow => "Overflow",
+            ExceptionVector::BoundRange => "Bound Range Exceeded",
+            ExceptionVector::InvalidOpcode => "Invalid Opcode",
+            ExceptionVector::DeviceNotAvailable => "Device Not Available",
+            ExceptionVector::Double => "Double Fault",
+            ExceptionVector::InvalidTss => "Invalid TSS",
+            ExceptionVector::SegmentNotPresent => "Segment Not Present",
+            ExceptionVector::Stack => "Stack Fault",
+            ExceptionVector::GeneralProtection => "General Protection Fault",
+            ExceptionVector::Page => "Page Fault",
+            ExceptionVector::X87FloatingPoint => "x87 Floating-Point Exception",
+            ExceptionVector::AlignmentCheck => "Alignment Check",
+            ExceptionVector::MachineCheck => "Machine Check",
+            ExceptionVector::SimdFloatingPoint => "SIMD Floating-Point Exception",
+            ExceptionVector::Virtualization => "Virtualization Exception",
+            ExceptionVector::ControlProtection => "Control Protection Exception",
+            ExceptionVector::HypervisorInjection => "Hypervisor Injection (AMD-only)",
+            ExceptionVector::VmmCommunication => "VMM Communication (AMD-only)",
+            ExceptionVector::Security => "Security Exception",
+            ExceptionVector::Unknown => "Unknown Exception",
+        };
+        write!(f, "{name}")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExceptionInfo {
-    pub kind: ExceptionKind,
+    pub kind: ExceptionVector,
     pub insn: [u8; 15],
     pub size: u8,
 }
@@ -204,7 +318,7 @@ impl TestResult {
                     return Err(());
                 }
 
-                let kind = ExceptionKind::try_from(buff[0])?;
+                let kind = ExceptionVector::try_from(buff[0])?;
                 let size = buff[1];
 
                 let mut insn = [0u8; 15];
@@ -224,7 +338,7 @@ impl TestResult {
 mod tests {
     use crate::{
         cpu::CpuState,
-        testcase::{ExceptionInfo, ExceptionKind, TestCase, TestOutcome, TestResult},
+        testcase::{ExceptionInfo, ExceptionVector, TestCase, TestOutcome, TestResult},
         *,
     };
 
@@ -287,7 +401,7 @@ mod tests {
         let start = TestResult {
             id: 69,
             outcome: TestOutcome::Exception(ExceptionInfo {
-                kind: ExceptionKind::DoubleFault,
+                kind: ExceptionVector::Double,
                 insn: [0xCC; 15],
                 size: 4,
             }),

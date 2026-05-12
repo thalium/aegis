@@ -1,10 +1,10 @@
+use core::error;
+
 use alloc::{boxed::Box, format, string::String, vec::Vec};
 use libaegis::{
     cpu::*,
-    testcase::{ExceptionInfo, ExceptionKind, TestCase},
-    wrap,
+    testcase::{ExceptionInfo, ExceptionVector, TestCase},
 };
-use paste::paste;
 use raw_cpuid::CpuId;
 use x86_64::{
     VirtAddr,
@@ -46,7 +46,6 @@ pub static DATASET: Mutex<Option<Box<dyn Dataset>>> = Mutex::new(None);
 pub static TEST_ID: Mutex<TestId> = Mutex::new(0);
 
 pub static TEST_INSN: Mutex<Vec<u8>> = Mutex::new(Vec::new());
-pub static TEST_EXCEPTION: Mutex<Option<ExceptionKind>> = Mutex::new(None);
 
 /// Creates the ice and fire pages
 ///
@@ -155,48 +154,74 @@ fn print_last_insn() {
     println!("Last instruction: {}", s);
 }
 
-fn mark_exception(kind: ExceptionKind) {
-    *TEST_EXCEPTION.lock() = Some(kind);
-}
-
-// The custom page_fault_handler
-fn page_fault_handler(
+pub fn exception_handler(
     state: &mut CpuState,
-    stack_frame: &InterruptStackFrame,
-    error_code: PageFaultErrorCode,
-    rip: &mut u64,
+    stack_frame: &mut InterruptStackFrame,
+    error_code: Option<u64>,
+    vector: ExceptionVector,
 ) {
-    if *rip < ICE_START as u64 || *rip > (FIRE_START as u64 + 0x1000) {
+    let mut is_exception = true;
+
+    if vector == ExceptionVector::Page {
+        let error_code = PageFaultErrorCode::from_bits_truncate(error_code.unwrap_or(0));
+        if state.rip < ICE_START as u64 || state.rip > (FIRE_START as u64 + 0x1000) {
+            print_last_insn();
+
+            let fault_addr = Cr2::read();
+            let fault_rip = stack_frame.instruction_pointer.as_u64();
+
+            println!("PAGE FAULT");
+            println!("CR2 / accessed addr = {:#x}", fault_addr.as_u64());
+            println!("RIP / faulting instr = {:#x}", fault_rip);
+            println!("error code = {:?}", error_code);
+            println!("saved rip = {:#x}", state.rip);
+
+            panic!(
+                "Unexpected page fault while not in test area: {:?}",
+                stack_frame
+            );
+        }
+
+        if error_code == PageFaultErrorCode::INSTRUCTION_FETCH {
+            is_exception = false;
+        } else {
+            print_last_insn();
+            println!(
+                "Attempted to access address {:#x} {error_code:#?}",
+                Cr2::read().as_u64()
+            );
+            hlt();
+        }
+    }
+    // println!("EXCEPTION {vector}({error_code:?})");
+
+    // Outside of the expected area
+    if vector != ExceptionVector::Page
+        && (state.rip < ICE_START as u64 || state.rip > (FIRE_START as u64 + 0x1000))
+    {
         print_last_insn();
-
-        let fault_addr = Cr2::read();
-        let fault_rip = stack_frame.instruction_pointer.as_u64();
-
-        println!("PAGE FAULT");
-        println!("CR2 / accessed addr = {:#x}", fault_addr.as_u64());
-        println!("RIP / faulting instr = {:#x}", fault_rip);
-        println!("error code = {:?}", error_code);
-        println!("saved rip = {:#x}", state.rip);
-
-        panic!(
-            "Unexpected page fault while not in test area: {:?}",
-            stack_frame
-        );
+        panic!("EXCEPTION {vector}({error_code:?}): \n{stack_frame:#?}");
     }
 
-    if error_code != PageFaultErrorCode::INSTRUCTION_FETCH {
-        print_last_insn();
-        println!("Attempted to access address {:#x}", Cr2::read().as_u64());
-        hlt();
-        mark_exception(ExceptionKind::PageFault);
+    let exception = if is_exception {
         x86_64::instructions::interrupts::disable();
+        Some(vector)
+    } else {
+        None
+    };
+
+    landing_pad(state, exception);
+
+    // Give the test a stack
+    unsafe {
+        stack_frame.as_mut().update(|f| {
+            f.stack_pointer = VirtAddr::new(TEST_STACK as u64);
+            f.instruction_pointer = VirtAddr::new(run_naked_test as *const () as u64);
+            // Clear flags
+            f.cpu_flags = 0;
+        });
     }
-
-    landing_pad(state);
-    *rip = run_naked_test as *const () as u64;
 }
-
-wrap!(raw_page_fault_handler, page_fault_handler);
 
 // The custom timer_handler
 pub extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
@@ -207,26 +232,15 @@ pub extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptSta
 }
 
 // Double fault handler
-pub fn double_fault_handler(
-    state: &mut CpuState,
-    stack_frame: &InterruptStackFrame,
-    _error_code: PageFaultErrorCode,
-    rip: &mut u64,
-) {
+#[unsafe(no_mangle)]
+pub extern "x86-interrupt" fn double_fault_handler_testing(
+    stack_frame: InterruptStackFrame,
+    code: u64,
+) -> ! {
     // Outside of the expected area
-    if *rip < ICE_START as u64 || *rip > (FIRE_START as u64 + 0x1000) {
-        print_last_insn();
-        panic!("EXCEPTION: DOUBLE FAULT\n{:#?}", stack_frame);
-    }
-
-    mark_exception(ExceptionKind::DoubleFault);
-    x86_64::instructions::interrupts::disable();
-    landing_pad(state);
-
-    *rip = run_naked_test as *const () as u64;
+    print_last_insn();
+    panic!("EXCEPTION: DOUBLE FAULT({code})\n{:#?}", stack_frame);
 }
-
-wrap!(raw_double_fault_handler, double_fault_handler);
 
 pub fn init_dataset(dataset: Box<dyn Dataset>) {
     // Enable the xsave instruction
@@ -262,7 +276,7 @@ pub fn init_dataset(dataset: Box<dyn Dataset>) {
     unsafe {
         IDT.lock()
             .double_fault
-            .set_handler_addr(VirtAddr::new(raw_double_fault_handler as *const () as u64))
+            .set_handler_fn(double_fault_handler_testing)
             .set_stack_index(DOUBLE_FAULT_IST_INDEX);
     }
 
@@ -299,9 +313,12 @@ pub extern "C" fn run_test_(rsp: u64) -> ! {
     };
 
     *TEST_ID.lock() = test.id;
-    *TEST_EXCEPTION.lock() = None;
-
     // Save the instruction for error logging
+
+    // if *TEST_INSN.lock() != test.insn[..test.size as usize] {
+    //     println!("New instruction: {:02x?}", &test.insn[..test.size as usize]);
+    // }
+
     *TEST_INSN.lock() = test.insn[..test.size as usize].to_vec();
 
     let rip = set_ice_instruction(&test.insn[..test.size as usize]).as_u64();
@@ -431,13 +448,12 @@ pub extern "C" fn run_test_(rsp: u64) -> ! {
     };
 }
 
-pub fn landing_pad(state: &mut CpuState) {
+pub fn landing_pad(state: &mut CpuState, exception: Option<ExceptionVector>) {
     x86_64::instructions::interrupts::disable();
 
     // Read the memory value
     state.mem0 = unsafe { *(MEM_ADDR as *const u64) };
 
-    let exception = TEST_EXCEPTION.lock().take();
     let exception = exception.map(|kind| {
         let mut insn = [0u8; 15];
         let test_insn = TEST_INSN.lock();

@@ -35,8 +35,14 @@ def iter_test_specs_from_db(dsn: str) -> Iterator[dict]:
 
     for tc in iter_test_cases(dsn):
         encoding = bytes.fromhex(tc.opcode)
+
         for state_index, cpu_state in enumerate(tc.initial_states):
-            if ((tc.id, state_index) not in completed) and ("enter" not in tc.opcode):
+            if tc.opcode.startswith("c8"):  # Skip enter instructions
+                continue
+
+            # Skip LIDT/LGDT hlt, iretq, sysret instructions
+
+            if (tc.id, state_index) not in completed:
                 yield {
                     "test_case_id": tc.id,
                     "state_index": state_index,

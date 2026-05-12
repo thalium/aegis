@@ -666,7 +666,7 @@ mod pyaegis {
 
         #[getter]
         pub fn insn(&self) -> [u8; 15] {
-            self.0.insn.into()
+            self.0.insn
         }
 
         #[getter]
@@ -739,10 +739,7 @@ mod pyaegis {
 
         #[getter]
         pub fn exception_kind(&self) -> Option<String> {
-            self.0
-                .exception_kind
-                .as_ref()
-                .map(|kind| kind.as_str().to_owned())
+            self.0.exception_kind.as_ref().map(|kind| kind.to_string())
         }
 
         #[getter]

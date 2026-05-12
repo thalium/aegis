@@ -35,6 +35,8 @@ run-args = [
     "ivshmem-plain,memdev=ivmem",
     "-object",
     "memory-backend-file,id=ivmem,share=on,mem-path=/dev/shm/ivshmem,size=16M",
+    "-no-reboot",
+    "-no-shutdown",
     # "-S",
     # "-s",
 ]

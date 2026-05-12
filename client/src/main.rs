@@ -8,9 +8,7 @@ fn read(result: Test) {
     if let Some(kind) = result.exception_kind {
         println!(
             "Test {} raised {} on bytes {:02x?}",
-            result.id,
-            kind.as_str(),
-            result.exception_instruction
+            result.id, kind, result.exception_instruction
         );
         return;
     }

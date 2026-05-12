@@ -18,7 +18,7 @@ use iced_x86::{Encoder, Instruction};
 use libaegis::{
     cpu::CpuState,
     protocol::{CONTINUE_MSG, EXIT_MSG, INIT_MSG, READ_MSG, WRITE_MSG, WRITE_REGION_OFFSET},
-    testcase::{ExceptionKind, TestCase, TestId, TestOutcome, TestResult},
+    testcase::{ExceptionVector, TestCase, TestId, TestOutcome, TestResult},
 };
 use memmap2::MmapMut;
 
@@ -33,7 +33,7 @@ pub struct Test {
     pub instruction: Vec<u8>,
     pub start_state: CpuState,
     pub end_state: Option<CpuState>,
-    pub exception_kind: Option<ExceptionKind>,
+    pub exception_kind: Option<ExceptionVector>,
     pub exception_instruction: Vec<u8>,
 }
 
@@ -476,7 +476,7 @@ impl Aegis {
                 TestOutcome::Exception(exception) => {
                     panic!(
                         "Initialization test failed with exception {}",
-                        exception.kind.as_str()
+                        exception.kind
                     )
                 }
             };
