@@ -61,7 +61,4 @@ pub fn init(virt_base: VirtAddr) -> usize {
     let (phys_base, size) = find_ivshem().expect("Did not find the ivshmem PCI");
     map_bar(phys_base, size, virt_base);
     size
-
-    // let src = b"Hello, World!\n";
-    // core::ptr::copy_nonoverlapping(src.as_ptr(), 0x_3333_3333_0000 as *mut u8, src.len());
 }

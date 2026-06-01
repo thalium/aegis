@@ -23,7 +23,7 @@ impl Dataset for TestDataset {
 
         let (buff, test) = match TestCase::from_bytes(buff) {
             Ok((buff, test)) => (buff, test),
-            Err(()) => {
+            Err(_) => {
                 shared_mem_manager.refresh_read_buffer();
                 let buff = shared_mem_manager.read_buffer();
                 TestCase::from_bytes(buff).expect("Failed to read despite request")

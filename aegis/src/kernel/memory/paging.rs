@@ -4,7 +4,7 @@ use x86_64::{
     structures::paging::{FrameAllocator, OffsetPageTable, PageTable, PhysFrame, Size4KiB},
 };
 
-/// Initialize a new OffsetPageTable.
+/// Initialize a new `OffsetPageTable`.
 ///
 /// # Safety
 /// This function is unsafe because the caller must guarantee that the
@@ -35,14 +35,6 @@ pub unsafe fn active_level_4_table(physical_memory_offset: VirtAddr) -> &'static
     let page_table_ptr: *mut PageTable = virt.as_mut_ptr();
 
     unsafe { &mut *page_table_ptr }
-}
-
-pub struct DummyFrameAllocator;
-
-unsafe impl FrameAllocator<Size4KiB> for DummyFrameAllocator {
-    fn allocate_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
-        None
-    }
 }
 
 /// A FrameAllocator that returns usable frames from the bootloader's memory map.

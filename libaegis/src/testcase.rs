@@ -12,7 +12,10 @@ use core::fmt::Display;
 #[cfg(feature = "std")]
 use std::fmt::Display;
 
-use crate::{compressible::Compressible, cpu::CpuState};
+use crate::{
+    compressible::{CodecError, Compressible},
+    cpu::CpuState,
+};
 
 pub type TestId = usize;
 
@@ -98,7 +101,7 @@ impl From<ExceptionVector> for u8 {
 }
 
 impl TryFrom<u8> for ExceptionVector {
-    type Error = ();
+    type Error = CodecError;
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
@@ -125,7 +128,7 @@ impl TryFrom<u8> for ExceptionVector {
             0x1C => Ok(ExceptionVector::HypervisorInjection),
             0x1D => Ok(ExceptionVector::VmmCommunication),
             0x1E => Ok(ExceptionVector::Security),
-            _ => Err(()),
+            _ => Err(CodecError),
         }
     }
 }
@@ -170,6 +173,7 @@ pub struct ExceptionInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)] // Avoid heap allocation in the kernel test loop.
 pub enum TestOutcome {
     Completed(CpuState),
     Exception(ExceptionInfo),
@@ -193,9 +197,9 @@ pub struct TestCase {
 
 impl TestCase {
     /// Writes a TestCase as a sequence of bytes to an address
-    pub fn to_bytes<'a>(&self, mut buff: &'a mut [u8]) -> Result<&'a mut [u8], ()> {
+    pub fn to_bytes<'a>(&self, mut buff: &'a mut [u8]) -> Result<&'a mut [u8], CodecError> {
         if buff.len() < 8 {
-            return Err(());
+            return Err(CodecError);
         }
 
         buff[..8].copy_from_slice(&self.id.to_le_bytes());
@@ -204,14 +208,14 @@ impl TestCase {
         buff = self.state.to_bytes(buff)?;
 
         if buff.len() < 16 {
-            return Err(());
+            return Err(CodecError);
         }
 
         buff[..15].copy_from_slice(&self.insn);
         buff = &mut buff[15..];
 
         if buff.is_empty() {
-            return Err(());
+            return Err(CodecError);
         }
 
         buff[0] = self.size;
@@ -220,9 +224,9 @@ impl TestCase {
         Ok(buff)
     }
 
-    pub fn from_bytes<'a>(mut buff: &'a [u8]) -> Result<(&'a [u8], Self), ()> {
+    pub fn from_bytes(mut buff: &[u8]) -> Result<(&[u8], Self), CodecError> {
         if buff.len() < 8 {
-            return Err(());
+            return Err(CodecError);
         }
 
         let id = usize::from_le_bytes(buff[..8].try_into().unwrap());
@@ -232,7 +236,7 @@ impl TestCase {
         buff = CpuState::decompress(buff, unsafe { state.assume_init_mut() })?;
 
         if buff.len() < 16 {
-            return Err(());
+            return Err(CodecError);
         }
 
         let mut insn = [0u8; 15];
@@ -266,9 +270,9 @@ pub struct TestResult {
 
 impl TestResult {
     /// Writes a TestCase as a sequence of bytes to an address
-    pub fn to_bytes<'a>(&self, mut buff: &'a mut [u8]) -> Result<&'a mut [u8], ()> {
+    pub fn to_bytes<'a>(&self, mut buff: &'a mut [u8]) -> Result<&'a mut [u8], CodecError> {
         if buff.len() < 9 {
-            return Err(());
+            return Err(CodecError);
         }
 
         buff[..8].copy_from_slice(&self.id.to_le_bytes());
@@ -282,7 +286,7 @@ impl TestResult {
             }
             TestOutcome::Exception(exception) => {
                 if buff.len() < 18 {
-                    return Err(());
+                    return Err(CodecError);
                 }
 
                 buff[0] = 1;
@@ -296,9 +300,9 @@ impl TestResult {
         Ok(buff)
     }
 
-    pub fn from_bytes<'a>(mut buff: &'a [u8]) -> Result<(&'a [u8], Self), ()> {
+    pub fn from_bytes(mut buff: &[u8]) -> Result<(&[u8], Self), CodecError> {
         if buff.len() < 9 {
-            return Err(());
+            return Err(CodecError);
         }
 
         let id = usize::from_le_bytes(buff[..8].try_into().unwrap());
@@ -315,7 +319,7 @@ impl TestResult {
             }
             1 => {
                 if buff.len() < 17 {
-                    return Err(());
+                    return Err(CodecError);
                 }
 
                 let kind = ExceptionVector::try_from(buff[0])?;
@@ -327,7 +331,7 @@ impl TestResult {
 
                 TestOutcome::Exception(ExceptionInfo { kind, insn, size })
             }
-            _ => return Err(()),
+            _ => return Err(CodecError),
         };
 
         Ok((buff, Self { id, outcome }))

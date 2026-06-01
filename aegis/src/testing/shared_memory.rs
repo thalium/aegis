@@ -56,11 +56,6 @@ impl Region {
     pub fn end(&self) -> VirtAddr {
         self.start + self.size
     }
-
-    /// is this region empty
-    pub fn is_empty(&self) -> bool {
-        self.size == 0
-    }
 }
 
 /// We use 2 stacks in ivshmem
@@ -123,6 +118,8 @@ impl SharedMemoryManager {
             buff.clear();
         }
 
+        while SERIAL1.lock().try_receive().is_ok() {}
+
         serial_println!("{}", INIT_MSG);
         println!("[*] Sent '{}'", INIT_MSG);
     }
@@ -140,23 +137,6 @@ impl SharedMemoryManager {
 
         let mut buff = Vec::new();
         Self::init_connection(&mut buff);
-    }
-
-    /// Writes `count` bytes into `dst`
-    /// If not enough bytes are available, asks the client for more space
-    pub fn write(&mut self, src: *const u8, count: usize) {
-        // Is there enough room to write this data ?
-        if self.write_ptr + count >= self.write_mem.end() {
-            self.clear_write_buffer();
-        }
-
-        let dst = self.write_ptr.as_mut_ptr();
-
-        unsafe {
-            core::ptr::copy_nonoverlapping(src, dst, count);
-        }
-
-        self.write_ptr += count;
     }
 
     /// Clears the write buffer, requesting that the client read it before it is erased
@@ -205,28 +185,6 @@ impl SharedMemoryManager {
         self.read_ptr = VirtAddr::new(buffer.as_ptr() as u64);
     }
 
-    /// Reads `count` bytes into `dst`
-    /// If not enough bytes are available, asks the client for more data
-    /// This could end the program
-    pub fn read(&mut self, dst: *mut u8, count: usize) {
-        // Is there enough room to write this data ?
-        if self.read_ptr + count >= self.read_mem.end() {
-            // Request a read
-            self.request_write();
-
-            // Clear the memory
-            self.read_ptr = self.read_mem.start;
-        }
-
-        let src = self.write_ptr.as_ptr();
-
-        unsafe {
-            core::ptr::copy_nonoverlapping(src, dst, count);
-        }
-
-        self.read_ptr += count;
-    }
-
     /// Requests the client to read the WRITE buffer so that we can continue writing to it
     fn request_read(&self) {
         let size = self.write_ptr - self.write_mem.start;
@@ -236,13 +194,9 @@ impl SharedMemoryManager {
         let mut buff = Vec::new();
 
         loop {
-            match SERIAL1.lock().try_receive() {
-                Ok(b) => {
-                    buff.push(b);
-                    break;
-                }
-
-                Err(_) => (),
+            if let Ok(b) = SERIAL1.lock().try_receive() {
+                buff.push(b);
+                break;
             }
         }
 
@@ -264,13 +218,9 @@ impl SharedMemoryManager {
         let mut buff = Vec::new();
 
         loop {
-            match SERIAL1.lock().try_receive() {
-                Ok(b) => {
-                    buff.push(b);
-                    break;
-                }
-
-                Err(_) => (),
+            if let Ok(b) = SERIAL1.lock().try_receive() {
+                buff.push(b);
+                break;
             }
         }
 

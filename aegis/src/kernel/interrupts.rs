@@ -1,9 +1,4 @@
-use crate::{
-    hlt_loop,
-    kernel::interrupts::hardware::{PICS, keyboard_interrupt_handler, timer_interrupt_handler},
-    println,
-    testing::harness::CPU_DUMP_START,
-};
+use crate::{hlt_loop, println, testing::harness::CPU_DUMP_START};
 use libaegis::{
     cpu::{
         CpuState, OFFSET_CS, OFFSET_DS, OFFSET_ES, OFFSET_FLAGS, OFFSET_FS, OFFSET_GS, OFFSET_R8,
@@ -20,35 +15,8 @@ use x86_64::{
 };
 
 pub mod gdt;
-pub mod hardware;
 
 pub static IDT: Mutex<InterruptDescriptorTable> = Mutex::new(InterruptDescriptorTable::new());
-
-pub const PIC_1_OFFSET: u8 = 32;
-pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
-
-#[derive(Debug, Clone, Copy)]
-#[repr(u8)]
-pub enum InterruptIndex {
-    PageFault = 14,
-    Timer = PIC_1_OFFSET,
-    Keyboard,
-}
-
-impl Into<u8> for InterruptIndex {
-    fn into(self) -> u8 {
-        self as u8
-    }
-}
-
-impl Into<usize> for InterruptIndex {
-    fn into(self) -> usize {
-        self as u8 as usize
-    }
-}
-
-pub type UnifiedHandler =
-    fn(exception: ExceptionVector, stack_frame: InterruptStackFrame, error_code: Option<u64>);
 
 pub type ExceptionHandler = fn(
     cpu_state: &mut CpuState,
@@ -164,37 +132,12 @@ impl InterruptManager {
 
         InterruptManager::init_idt();
 
-        // Initialize hardware interrupts
-        {
-            let mut idt = IDT.lock();
-            idt[InterruptIndex::Timer as usize].set_handler_fn(timer_interrupt_handler);
-            idt[InterruptIndex::Keyboard as usize].set_handler_fn(keyboard_interrupt_handler);
-        }
-
         // Load the IDT with a static reference
         let idt_ref: &'static InterruptDescriptorTable = unsafe {
             // Safety: IDT lives for the entire program, so 'static is correct
             &*(&*IDT.lock() as *const InterruptDescriptorTable)
         };
         idt_ref.load();
-
-        unsafe { PICS.lock().initialize() };
-        x86_64::instructions::interrupts::enable();
-    }
-
-    /// Set the handler function for the IDT entry and sets the present bit.
-    pub fn set_handler(idx: usize, handler: extern "x86-interrupt" fn(InterruptStackFrame)) {
-        let mut idt = IDT.lock();
-        idt[idx].set_handler_fn(handler);
-    }
-
-    /// Set the handler address for the IDT entry and sets the present bit
-    pub unsafe fn set_handler_addr(idx: usize, handler: VirtAddr) {
-        let mut idt = IDT.lock();
-
-        unsafe {
-            idt[idx].set_handler_addr(handler);
-        }
     }
 }
 
@@ -376,16 +319,7 @@ pub extern "C" fn error_handler<const HAS_ERROR_CODE: bool, const VECTOR: u8>() 
         "mov ax, word ptr [rsp + 0xA0]",
         "mov word ptr [rdi + {OFFSET_SS}], ax",
 
-        /*
-            Save extended CPU state.
-
-            Keep this disabled temporarily if you are still debugging
-            iretq corruption. A wrong OFFSET_AVX, bad alignment, or
-            undersized XSAVE buffer can overwrite unrelated memory.
-        */
-        // "xor ecx, ecx",
-        // "xgetbv",
-        // "xsave64 [rdi + {OFFSET_AVX}]",
+        /* TODO: Re-enable and validate XSAVE/XRSTOR vector-state round trips. */
 
         /*
             Call inner handler.
@@ -459,8 +393,6 @@ pub extern "C" fn error_handler<const HAS_ERROR_CODE: bool, const VECTOR: u8>() 
         "iretq",
 
         CPU_DUMP_ADDR = const CPU_DUMP_START,
-
-        // OFFSET_AVX = const OFFSET_AVX,
 
         OFFSET_RIP = const OFFSET_RIP,
         OFFSET_FLAGS = const OFFSET_FLAGS,

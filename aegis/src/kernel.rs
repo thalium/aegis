@@ -9,7 +9,6 @@ pub mod driver;
 pub mod interrupts;
 pub mod memory;
 pub mod qemu;
-pub mod tests;
 
 static KERNEL: Mutex<Option<Kernel>> = Mutex::new(None);
 

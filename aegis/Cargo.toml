@@ -1,26 +1,24 @@
 [package]
 name = "aegis"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
 
 [[bin]]
 name = "aegis"
-test = true
+test = false
 bench = false
 
 [dependencies]
-bootloader = { version = "0.9", features = ["map_physical_memory"] }
-volatile = "0.2.6"
-lazy_static = { version = "1.0", features = ["spin_no_std"] }
-spin = "0.5.2"
-x86_64 = "0.14.2"
-uart_16550 = "0.4.0"
-pic8259 = "0.10.1"
-pc-keyboard = "0.7.0"
-linked_list_allocator = "0.9.0"
-paste = "1.0.15"
-raw-cpuid = "11.6.0"
-libaegis = { path = "../libaegis", features = [] }
+bootloader = { workspace = true, features = ["map_physical_memory"] }
+volatile.workspace = true
+lazy_static = { workspace = true, features = ["spin_no_std"] }
+spin.workspace = true
+x86_64.workspace = true
+uart_16550.workspace = true
+linked_list_allocator.workspace = true
+raw-cpuid.workspace = true
+libaegis.workspace = true
 
 [package.metadata.bootimage]
 run-args = [
@@ -36,27 +34,4 @@ run-args = [
     "-object",
     "memory-backend-file,id=ivmem,share=on,mem-path=/dev/shm/ivshmem,size=16M",
     "-no-reboot",
-    "-no-shutdown",
-    # "-S",
-    # "-s",
 ]
-
-test-args = [
-    "-device",
-    "isa-debug-exit,iobase=0xf4,iosize=0x04",
-    "-serial",
-    "stdio",
-    "-display",
-    "none",
-]
-test-success-exit-code = 33
-test-timeout = 300
-
-[[test]]
-name = "should_panic"
-harness = false
-
-
-[[test]]
-name = "stack_overflow"
-harness = false

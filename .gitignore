@@ -6,3 +6,4 @@
 /aegis.bundle
 test_results.txt
 __pycache__
+.pytest_cache__

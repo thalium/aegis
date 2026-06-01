@@ -1,14 +1,15 @@
 [package]
 name = "client"
-version = "0.1.0"
-edition = "2021"
-
-[lib]
-name = "client"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
 
 [dependencies]
-libaegis = { path = "../libaegis", features = ["std"] }
-memmap2 = "0.9.9"
-rand = "0.9.2"
-iced-x86 = "1.21.0"
-futures = "0.3.31"
+libaegis = { workspace = true, features = ["std"] }
+memmap2.workspace = true
+futures.workspace = true
+hex.workspace = true
+indicatif.workspace = true
+postgres = { workspace = true, features = ["with-serde_json-1"] }
+serde_json.workspace = true
+clap = { workspace = true, features = ["derive", "env"] }

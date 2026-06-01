@@ -7,10 +7,10 @@ use x86_64::{
     },
 };
 
-use crate::kernel::memory::memory::BootInfoFrameAllocator;
+use crate::kernel::memory::paging::BootInfoFrameAllocator;
 
 pub mod allocator;
-pub mod memory;
+pub mod paging;
 
 pub struct PhysicallyMappedMemoryManager {
     mapper: OffsetPageTable<'static>,
@@ -21,7 +21,7 @@ impl PhysicallyMappedMemoryManager {
     pub fn new(boot_info: &'static BootInfo) -> Self {
         let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
 
-        let mut mapper = unsafe { memory::init(phys_mem_offset) };
+        let mut mapper = unsafe { paging::init(phys_mem_offset) };
         let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };
 
         // Initialize heap
@@ -32,11 +32,6 @@ impl PhysicallyMappedMemoryManager {
             mapper,
             frame_allocator,
         }
-    }
-
-    /// Returns the frame allocator
-    pub fn frame_allocator(&mut self) -> &mut dyn FrameAllocator<Size4KiB> {
-        &mut self.frame_allocator
     }
 
     /// Returns the mapper

@@ -1,20 +1,19 @@
 #![no_std]
 #![no_main]
-#![feature(custom_test_frameworks)]
-#![test_runner(aegis::kernel::tests::test_runner)]
-#![reexport_test_harness_main = "test_main"]
+#![feature(abi_x86_interrupt)]
 
 extern crate alloc;
+
+mod kernel;
+mod testing;
 
 #[cfg(not(test))]
 use core::panic::PanicInfo;
 
-use aegis::{
-    hlt_loop,
+use crate::{
     kernel::{Kernel, driver::ivshmem},
-    println,
     testing::{
-        harness::{init_dataset, run_naked_test},
+        harness::{init_dataset, run_test},
         shared_memory::{Region, SHARED_MEMORY_MANAGER},
         test_dataset::TestDataset,
     },
@@ -41,9 +40,13 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     println!("Starting testing...");
 
-    run_naked_test();
+    run_test();
+}
 
-    hlt_loop();
+pub fn hlt_loop() -> ! {
+    loop {
+        x86_64::instructions::hlt();
+    }
 }
 
 /// This function is called on panic.

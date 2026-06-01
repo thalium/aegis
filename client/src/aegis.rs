@@ -4,17 +4,12 @@ use std::{
     io::{BufRead, BufReader, ErrorKind, Write},
     os::unix::net::UnixStream,
     path::Path,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    thread::{self, sleep, JoinHandle},
-    time::{self, Duration, Instant},
+    thread::{self, JoinHandle, sleep},
+    time::Duration,
 };
 
-use futures::{channel::mpsc, executor::block_on, stream::StreamExt, SinkExt};
+use futures::{SinkExt, channel::mpsc, executor::block_on, stream::StreamExt};
 
-use iced_x86::{Encoder, Instruction};
 use libaegis::{
     cpu::CpuState,
     protocol::{CONTINUE_MSG, EXIT_MSG, INIT_MSG, READ_MSG, WRITE_MSG, WRITE_REGION_OFFSET},
@@ -22,24 +17,17 @@ use libaegis::{
 };
 use memmap2::MmapMut;
 
-pub mod generator;
-
 const TX_BUFFER_SIZE: usize = 256;
 
 #[derive(Clone)]
 pub struct Test {
     pub id: usize,
-    pub name: String,
-    pub instruction: Vec<u8>,
-    pub start_state: CpuState,
     pub end_state: Option<CpuState>,
     pub exception_kind: Option<ExceptionVector>,
-    pub exception_instruction: Vec<u8>,
 }
 
 #[derive(Clone)]
 pub struct NamedTestCase {
-    pub name: String,
     pub test_case: TestCase,
 }
 
@@ -78,12 +66,12 @@ where
     }
 }
 
-struct PeekableReciever<T> {
+struct PeekableReceiver<T> {
     next: Option<T>,
     rx: mpsc::Receiver<T>,
 }
 
-impl<T> PeekableReciever<T> {
+impl<T> PeekableReceiver<T> {
     fn new(rx: mpsc::Receiver<T>) -> Self {
         Self { rx, next: None }
     }
@@ -104,103 +92,40 @@ impl<T> PeekableReciever<T> {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, PartialOrd)]
-pub enum Verbosity {
-    Quiet = 0,
-    Normal = 1,
-    Verbose = 2,
-}
-
-macro_rules! log {
-    ($self:expr, $level:expr, $($arg:tt)*) => {{
-        $self.log($level, format_args!($($arg)*));
-    }};
-}
-
-/// Creates a test case from a icec-x86 instruction
-pub fn make_test_case(
-    zero_state: &CpuState,
-    id: usize,
-    insn: Instruction,
-    state: CpuState,
-) -> Result<TestCase, ()> {
-    let mut encoder = Encoder::new(64);
-    encoder.encode(&insn, zero_state.rip).map_err(|_| ())?;
-    let mut buff = encoder.take_buffer();
-    let size = buff.len() as u8;
-    buff.resize(15, 0);
-
-    Ok(TestCase {
-        id,
-        state,
-        size,
-        insn: buff.as_slice().try_into().unwrap(),
-    })
-}
-
-pub struct AegisConfig<'a> {
-    pub serial_sock: &'a str,
-    pub shared_mem: &'a str,
-    pub verbosity: Verbosity,
-    pub cancel: Arc<AtomicBool>,
-}
-
-impl<'a> Default for AegisConfig<'a> {
-    fn default() -> Self {
-        Self {
-            serial_sock: "",
-            shared_mem: "",
-            verbosity: Verbosity::Normal,
-            cancel: Arc::new(AtomicBool::new(false)),
-        }
-    }
-}
-
 pub struct Aegis {
     sock: UnixStream,
     mmap: MmapMut,
 
-    verbosity: Verbosity,
-
-    rx: Option<PeekableReciever<NamedTestCase>>,
+    rx: Option<PeekableReceiver<NamedTestCase>>,
     writer_handle: Option<JoinHandle<()>>,
 
     tx: Option<mpsc::Sender<Test>>,
     reader_handle: Option<JoinHandle<()>>,
 
-    /// The "zero state" of the CPU
-    pub zero_state: CpuState,
-
-    states: HashMap<TestId, NamedTestCase>,
-
-    cancel: Arc<AtomicBool>,
+    states: HashMap<TestId, TestCase>,
 }
 
 impl Aegis {
-    pub fn new(config: AegisConfig) -> Self {
+    pub fn new(serial_sock: &str, shared_mem: &str) -> Self {
         // Wait for the shared_mem and serial_sock files to exist
         loop {
-            if config.cancel.load(Ordering::Relaxed) {
-                panic!("Interrupted");
-            }
-
-            if Path::new(config.serial_sock).exists() && Path::new(config.shared_mem).exists() {
+            if Path::new(serial_sock).exists() && Path::new(shared_mem).exists() {
                 break;
             }
 
-            sleep(time::Duration::from_millis(100));
+            sleep(Duration::from_millis(100));
         }
 
         let file = OpenOptions::new()
             .read(true)
             .write(true)
-            .open(config.shared_mem)
+            .open(shared_mem)
             .expect("Cannot open file for shared memory");
 
         // SAFETY: the file descriptor remains open for the lifetime of the mmap
         let mmap = unsafe { MmapMut::map_mut(&file).expect("Could not mmap") };
 
-        let sock = UnixStream::connect(config.serial_sock).expect("Failed to open socket");
+        let sock = UnixStream::connect(serial_sock).expect("Failed to open socket");
         sock.set_read_timeout(Some(Duration::from_millis(100)))
             .expect("Cannot set read timeout");
 
@@ -211,16 +136,7 @@ impl Aegis {
             tx: None,
             reader_handle: None,
             writer_handle: None,
-            verbosity: config.verbosity,
-            cancel: config.cancel,
-            zero_state: CpuState::zero(),
             states: HashMap::new(),
-        }
-    }
-
-    fn maybe_exit(&self) {
-        if self.cancel.load(Ordering::Relaxed) {
-            panic!("Interrupted")
         }
     }
 
@@ -268,17 +184,11 @@ impl Aegis {
             block_on(writer.run());
         });
 
-        self.rx = Some(PeekableReciever::new(rx));
+        self.rx = Some(PeekableReceiver::new(rx));
         self.writer_handle = Some(writer_handle);
     }
 
-    fn log(&self, level: Verbosity, args: std::fmt::Arguments) {
-        if level <= self.verbosity {
-            println!("{}", args);
-        }
-    }
-
-    /// Recieves a single line from the unix socket
+    /// Receives a single line from the unix socket.
     fn recv_line(&mut self) -> String {
         let mut reader = BufReader::new(&self.sock);
         let mut line = String::new();
@@ -291,8 +201,6 @@ impl Aegis {
                     _ => panic!("Error while reading {}", e),
                 },
             }
-
-            self.maybe_exit();
         }
 
         line.trim().to_owned()
@@ -301,13 +209,6 @@ impl Aegis {
     /// Gets the read buffer from a "read" serial command
     fn read_get_buff<'a>(&'a self, args: &str) -> &'a [u8] {
         let size: usize = args.parse().unwrap();
-        log!(
-            self,
-            Verbosity::Verbose,
-            "[*] Received read instruction: {} bytes",
-            size
-        );
-
         self.mmap.flush().unwrap();
         &self.mmap[WRITE_REGION_OFFSET..WRITE_REGION_OFFSET + size]
     }
@@ -334,22 +235,11 @@ impl Aegis {
         for result in self.read_get_tests(args) {
             let previous = self.states.remove(&result.id).unwrap();
 
-            let name = previous.name;
-            let previous = previous.test_case;
-
             self.tx
                 .as_mut()
                 .expect("the writer was not initialized")
                 .send(Test {
                     id: result.id,
-                    name,
-                    instruction: previous
-                        .insn
-                        .iter()
-                        .take(previous.size as usize)
-                        .copied()
-                        .collect::<Vec<u8>>(),
-                    start_state: previous.state.clone(),
                     end_state: match &result.outcome {
                         TestOutcome::Completed(diff) => Some(previous.state.diff(diff)),
                         TestOutcome::Exception(_) => None,
@@ -357,15 +247,6 @@ impl Aegis {
                     exception_kind: match &result.outcome {
                         TestOutcome::Completed(_) => None,
                         TestOutcome::Exception(info) => Some(info.kind),
-                    },
-                    exception_instruction: match &result.outcome {
-                        TestOutcome::Completed(_) => vec![],
-                        TestOutcome::Exception(info) => info
-                            .insn
-                            .iter()
-                            .take(info.size as usize)
-                            .copied()
-                            .collect::<Vec<u8>>(),
                     },
                 })
                 .await
@@ -389,13 +270,6 @@ impl Aegis {
         let written_bytes = unsafe { end_ptr.offset_from(start) };
         writeln!(self.sock, "{}: {}", CONTINUE_MSG, written_bytes)
             .expect("Error sending continue message");
-
-        log!(
-            self,
-            Verbosity::Verbose,
-            "[*] Sent: {} bytes",
-            written_bytes
-        );
     }
 
     /// Handles the "write" command
@@ -418,7 +292,8 @@ impl Aegis {
                 }
             };
 
-            self.states.insert(test.test_case.id, test.clone());
+            self.states
+                .insert(test.test_case.id, test.test_case.clone());
 
             let test = &test.test_case;
 
@@ -426,7 +301,7 @@ impl Aegis {
                 Ok(next_buff) => {
                     buff = next_buff;
                 }
-                Err(()) => {
+                Err(_) => {
                     // We filled the buffer
                     break;
                 }
@@ -436,52 +311,6 @@ impl Aegis {
         }
 
         self.flush_write(end_ptr);
-    }
-
-    // Executes a nop instruction with a zero state to observe the "zero CPU" state (this gives us the avx header as well as rip and rsp)
-    fn init_zero_state(&mut self) {
-        let insn_len: u64;
-
-        // Send a test with a zero state and a nop instruction
-        {
-            let line = self.recv_line();
-            let (command, _) = Self::parse_line(&line);
-            assert_eq!(command, WRITE_MSG);
-
-            let zero_test = make_test_case(
-                &self.zero_state,
-                0,
-                Instruction::with(iced_x86::Code::Nopw),
-                CpuState::zero(),
-            )
-            .expect("The zero test should compile");
-            insn_len = zero_test.size as u64;
-
-            let ptr = self.write_ptr();
-            let ptr = zero_test.to_bytes(ptr).unwrap();
-            self.flush_write(ptr.as_ptr());
-        }
-
-        // Reads the zero state
-        {
-            let line = self.recv_line();
-            let (command, args) = Self::parse_line(&line);
-            assert_eq!(command, READ_MSG);
-
-            let results = self.read_get_tests(args);
-            assert_eq!(results.len(), 1);
-
-            self.zero_state = match results.into_iter().next().unwrap().outcome {
-                TestOutcome::Completed(state) => state,
-                TestOutcome::Exception(exception) => {
-                    panic!(
-                        "Initialization test failed with exception {}",
-                        exception.kind
-                    )
-                }
-            };
-            // self.zero_state.rip -= insn_len;
-        }
     }
 
     /// Initializes client
@@ -494,24 +323,16 @@ impl Aegis {
             let mut line = String::new();
 
             match reader.read_line(&mut line) {
-                Ok(_) => break,
+                Ok(_) if line.trim() == INIT_MSG => break,
+                Ok(_) => (),
                 Err(e) => match e.kind() {
                     ErrorKind::WouldBlock | ErrorKind::TimedOut => (),
                     _ => panic!("Error while reading {}", e),
                 },
             }
 
-            if line == INIT_MSG {
-                break;
-            }
-
             sleep(Duration::from_millis(500));
-
-            self.maybe_exit();
         }
-
-        // Retrieve the zero state
-        self.init_zero_state();
     }
 
     // Splits the command from the arguments
@@ -524,8 +345,6 @@ impl Aegis {
 
     /// Main loop
     pub fn run(&mut self) {
-        let start = Instant::now();
-
         loop {
             let line = self.recv_line();
 
@@ -540,8 +359,6 @@ impl Aegis {
 
                 _ => panic!("[*] Unknown instruction: {}", line),
             }
-
-            self.maybe_exit();
         }
 
         // Waits on the reader
@@ -549,15 +366,11 @@ impl Aegis {
             .as_mut()
             .expect("The writer was not initialized")
             .close_channel();
-        self.reader_handle.take().map(|handle| handle.join());
-
-        log!(
-            self,
-            Verbosity::Normal,
-            "[*] Up time {:?}",
-            Instant::now() - start
-        );
-
-        log!(self, Verbosity::Normal, "[*] Quitting...");
+        if let Some(handle) = self.reader_handle.take() {
+            handle.join().expect("Reader thread panicked");
+        }
+        if let Some(handle) = self.writer_handle.take() {
+            handle.join().expect("Writer thread panicked");
+        }
     }
 }

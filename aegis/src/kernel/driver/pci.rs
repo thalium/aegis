@@ -47,12 +47,12 @@ impl PciPorts {
 
 /// A base address register
 #[derive(Debug, Clone)]
-pub struct BAR<'a> {
-    device: &'a PciDevice,
+pub struct Bar<'device> {
+    device: &'device PciDevice,
     index: u8,
 }
 
-impl<'a> BAR<'a> {
+impl<'device> Bar<'device> {
     const ADDR_MASK: u32 = 0xFFFFFFF0;
 
     /// Reads the value of this BAR
@@ -63,11 +63,6 @@ impl<'a> BAR<'a> {
     /// Writes to this BAR
     pub fn write(&mut self, ports: &mut PciPorts, value: u32) {
         self.device.write_bar(ports, self.index, value)
-    }
-
-    /// Verifies this BAR is memory
-    pub fn is_memory(&self, ports: &mut PciPorts) -> bool {
-        self.read(ports) & 0x1 == 0
     }
 
     /// Determines the physical address of the BAR region
@@ -105,18 +100,18 @@ pub struct PciDevice {
 impl PciDevice {
     /// Reads the contents of a BAR
     fn read_bar(&self, ports: &mut PciPorts, bar_index: u8) -> u32 {
-        let offset = 0x10 + (bar_index as u8 * 4);
+        let offset = 0x10 + (bar_index * 4);
         ports.read_u32(self.bus, self.device, self.function, offset)
     }
 
     /// Writes content to a BAR
     fn write_bar(&self, ports: &mut PciPorts, bar_index: u8, value: u32) {
-        let offset = 0x10 + (bar_index as u8 * 4);
+        let offset = 0x10 + (bar_index * 4);
         ports.write_u32(self.bus, self.device, self.function, offset, value);
     }
 
-    pub fn bar(&self, index: u8) -> BAR<'_> {
-        BAR {
+    pub fn bar(&self, index: u8) -> Bar<'_> {
+        Bar {
             device: self,
             index,
         }

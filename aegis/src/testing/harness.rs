@@ -1,5 +1,3 @@
-use core::error;
-
 use alloc::{boxed::Box, format, string::String, vec::Vec};
 use libaegis::{
     cpu::*,
@@ -22,11 +20,7 @@ use x86_64::{
 use crate::{
     kernel::{
         Kernel,
-        interrupts::{
-            IDT, InterruptIndex, InterruptManager, UNIFIED_HANDLER,
-            gdt::DOUBLE_FAULT_IST_INDEX,
-            hardware::{PICS, pit_set_interval},
-        },
+        interrupts::{IDT, UNIFIED_HANDLER, gdt::DOUBLE_FAULT_IST_INDEX},
     },
     println,
 };
@@ -109,7 +103,6 @@ pub fn create_ice_and_fire(kernel: &mut Kernel) -> Result<(), MapToError<Size4Ki
 }
 
 /// Create the CPU state huge page
-/// TODO: this won't work with concurency
 pub fn create_cpu_dump_pages(kernel: &mut Kernel) -> Result<(), MapToError<Size4KiB>> {
     let start = VirtAddr::new(CPU_DUMP_START as u64);
 
@@ -203,12 +196,7 @@ pub fn exception_handler(
         panic!("EXCEPTION {vector}({error_code:?}): \n{stack_frame:#?}");
     }
 
-    let exception = if is_exception {
-        x86_64::instructions::interrupts::disable();
-        Some(vector)
-    } else {
-        None
-    };
+    let exception = if is_exception { Some(vector) } else { None };
 
     landing_pad(state, exception);
 
@@ -216,18 +204,10 @@ pub fn exception_handler(
     unsafe {
         stack_frame.as_mut().update(|f| {
             f.stack_pointer = VirtAddr::new(TEST_STACK as u64);
-            f.instruction_pointer = VirtAddr::new(run_naked_test as *const () as u64);
+            f.instruction_pointer = VirtAddr::new(run_test as *const () as u64);
             // Clear flags
             f.cpu_flags = 0;
         });
-    }
-}
-
-// The custom timer_handler
-pub extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    unsafe {
-        PICS.lock()
-            .notify_end_of_interrupt(InterruptIndex::Timer as u8);
     }
 }
 
@@ -261,12 +241,6 @@ pub fn init_dataset(dataset: Box<dyn Dataset>) {
     // Verifies the CPU features
     verify_cpu();
 
-    // Sets the timer handler
-    InterruptManager::set_handler(InterruptIndex::Timer as usize, timer_interrupt_handler);
-
-    // Set the timer frequency
-    pit_set_interval(1);
-
     // Sets the generic handler
     unsafe {
         UNIFIED_HANDLER = exception_handler;
@@ -291,18 +265,8 @@ pub fn init_dataset(dataset: Box<dyn Dataset>) {
     *DATASET.lock() = Some(dataset);
 }
 
-/// We want to ensure that our function's stack is cleared before we jump to the test
-#[unsafe(naked)]
 #[unsafe(no_mangle)]
-pub extern "C" fn run_naked_test() {
-    // Pop the return address too
-    core::arch::naked_asm!("mov rdi, rsp", "jmp {run_test_}", run_test_ = sym run_test_)
-}
-
-#[doc(hidden)]
-pub extern "C" fn run_test_(rsp: u64) -> ! {
-    x86_64::instructions::interrupts::disable();
-
+pub extern "C" fn run_test() -> ! {
     let mut test = {
         let dataset = DATASET.lock();
 
@@ -419,7 +383,7 @@ pub extern "C" fn run_test_(rsp: u64) -> ! {
 
             CPU_DUMP_ADDR = in(reg) &test.state,
 
-            // OFFSET_AVX = const OFFSET_AVX,
+            // TODO: Restore vector state with XRSTOR after the XSAVE path is validated.
 
             OFFSET_RIP = const OFFSET_RIP,
             OFFSET_FLAGS = const OFFSET_FLAGS,
@@ -449,8 +413,6 @@ pub extern "C" fn run_test_(rsp: u64) -> ! {
 }
 
 pub fn landing_pad(state: &mut CpuState, exception: Option<ExceptionVector>) {
-    x86_64::instructions::interrupts::disable();
-
     // Read the memory value
     state.mem0 = unsafe { *(MEM_ADDR as *const u64) };
 

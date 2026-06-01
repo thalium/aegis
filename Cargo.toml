@@ -1,3 +1,26 @@
 [workspace]
-members = ["aegis", "cli", "client", "pyaegis", "libaegis"]
+members = ["aegis", "client", "libaegis"]
 resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+bootloader = "0.9"
+clap = "4"
+futures = "0.3.31"
+hex = "0.4.3"
+indicatif = "0.18.4"
+lazy_static = "1.0"
+libaegis = { path = "libaegis" }
+linked_list_allocator = "0.9.0"
+memmap2 = "0.9.9"
+postgres = "0.19.13"
+raw-cpuid = "11.6.0"
+serde_json = "1.0.149"
+spin = "0.5.2"
+uart_16550 = "0.4.0"
+volatile = "0.2.6"
+x86_64 = "0.14.2"

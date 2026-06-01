@@ -1,5 +1,5 @@
-/// The protocol used for communicating between the host and the VM
-/// TODO: add detail
+//! Serial commands used to coordinate shared-memory transfers between the host
+//! and the VM.
 
 /// Initialize a connection
 pub const INIT_MSG: &str = "HELLO";
