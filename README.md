@@ -69,10 +69,34 @@ unit tests:
 just validate
 ```
 
+## x87 state protocol
+
+x87 states use `x87_r0` through `x87_r7`, each a 20-digit, little-endian
+hexadecimal string holding an exact 80-bit physical FPU register R0–R7. TOP is
+recorded only in bits 11–13 of numeric `x87_status`; consumers derive logical
+`ST(i)` as `R[((x87_status >> 11) + i) & 7]`. A redundant `x87_top` input is
+accepted only for validation/legacy fixtures and is never serialized in a
+result. The remaining numeric fields are `x87_control`, `x87_tag`,
+`x87_opcode`, `x87_ip`, and `x87_dp`. `x87_tag` is FXSAVE's physical-order
+abridged tag byte (a set bit is non-empty).
+
+`mm0`–`mm7` are low-64 views of physical R0–R7. A row may provide both views,
+but values that overlap must agree. MMX-only rows retain the historical
+all-active MMX initialization; mixed rows preserve the supplied x87
+control/tag state. Legacy `x87_st0`–`x87_st7` input remains accepted for
+compatibility but cannot be mixed with physical `x87_rN` fields.
+
+For environment-memory instructions, `scratch_memory` is an optional 1024-digit
+lowercase hexadecimal string representing 512 raw bytes rooted at the `mem0`
+address. It preserves FXSAVE/FXRSTOR payload bytes. It cannot be combined with
+legacy `mem0_value` or `mem1_value` fields; those remain 64-bit word views for
+ordinary memory tests.
+
 ## Known Limitation
 
-The CPU-state protocol still exposes XMM, YMM, and ZMM values, but the kernel's
-XSAVE/XRSTOR instructions are currently disabled.
+The kernel restores and captures the legacy FXSAVE state (x87/MMX and XMM)
+around every test. XSAVE/XRSTOR remains disabled, so YMM/ZMM upper halves are
+not yet restored or captured.
 
 Sometimes their is a race condition with the initial "HELLO" message.
 Restarting usually does the trick.

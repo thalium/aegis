@@ -1,10 +1,10 @@
 use crate::{hlt_loop, println, testing::harness::CPU_DUMP_START};
 use libaegis::{
     cpu::{
-        CpuState, OFFSET_CS, OFFSET_DS, OFFSET_ES, OFFSET_FLAGS, OFFSET_FS, OFFSET_GS, OFFSET_R8,
-        OFFSET_R9, OFFSET_R10, OFFSET_R11, OFFSET_R12, OFFSET_R13, OFFSET_R14, OFFSET_R15,
-        OFFSET_RAX, OFFSET_RBP, OFFSET_RBX, OFFSET_RCX, OFFSET_RDI, OFFSET_RDX, OFFSET_RIP,
-        OFFSET_RSI, OFFSET_RSP, OFFSET_SS,
+        CpuState, OFFSET_AVX, OFFSET_CS, OFFSET_DS, OFFSET_ES, OFFSET_FLAGS, OFFSET_FS, OFFSET_GS,
+        OFFSET_R8, OFFSET_R9, OFFSET_R10, OFFSET_R11, OFFSET_R12, OFFSET_R13, OFFSET_R14,
+        OFFSET_R15, OFFSET_RAX, OFFSET_RBP, OFFSET_RBX, OFFSET_RCX, OFFSET_RDI, OFFSET_RDX,
+        OFFSET_RIP, OFFSET_RSI, OFFSET_RSP, OFFSET_SS,
     },
     testcase::ExceptionVector,
 };
@@ -319,7 +319,12 @@ pub extern "C" fn error_handler<const HAS_ERROR_CODE: bool, const VECTOR: u8>() 
         "mov ax, word ptr [rsp + 0xA0]",
         "mov word ptr [rdi + {OFFSET_SS}], ax",
 
-        /* TODO: Re-enable and validate XSAVE/XRSTOR vector-state round trips. */
+        /*
+            Capture the complete legacy x87/MMX/SSE state before Rust executes.
+            CpuState starts with its 64-byte-aligned AVX image, satisfying the
+            FXSAVE alignment requirement.
+        */
+        "fxsave64 [rdi + {OFFSET_AVX}]",
 
         /*
             Call inner handler.
@@ -394,6 +399,7 @@ pub extern "C" fn error_handler<const HAS_ERROR_CODE: bool, const VECTOR: u8>() 
 
         CPU_DUMP_ADDR = const CPU_DUMP_START,
 
+        OFFSET_AVX = const OFFSET_AVX,
         OFFSET_RIP = const OFFSET_RIP,
         OFFSET_FLAGS = const OFFSET_FLAGS,
 

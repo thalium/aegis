@@ -350,7 +350,8 @@ mod tests {
     fn case_compress_decompress() {
         let mut state = CpuState::zero();
         state.gpr.rax = 15;
-        state.mmx.mm3 = 69;
+        state.fpu.initialize_mmx();
+        state.fpu.set_mmx(3, 69);
         state.rip = 720;
         state.flags = cpu::FlagState(95);
 
@@ -378,7 +379,8 @@ mod tests {
     fn result_compress_decompress() {
         let mut state = CpuState::zero();
         state.gpr.rax = 15;
-        state.mmx.mm3 = 69;
+        state.fpu.initialize_mmx();
+        state.fpu.set_mmx(3, 69);
         state.rip = 720;
         state.flags = cpu::FlagState(95);
 

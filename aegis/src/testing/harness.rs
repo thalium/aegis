@@ -32,7 +32,9 @@ pub const FIRE_START: usize = 0x_6666_6666_1000;
 pub const TEST_STACK_START: usize = 0x_6666_6600_0000;
 pub const TEST_STACK: usize = 0x_6666_6600_5fff;
 
+/// Independently seeded source and destination words for memory and string tests.
 pub const MEM_ADDR: usize = 0x_6666_6601_0100;
+pub const MEM1_ADDR: usize = 0x_6666_6601_0200;
 
 /// This needs to be aligned
 pub const CPU_DUMP_START: usize = 0x_5555_0000_0000;
@@ -69,8 +71,10 @@ pub fn create_ice_and_fire(kernel: &mut Kernel) -> Result<(), MapToError<Size4Ki
     // ------------------------
     // Stack page: R/W
     // ------------------------
-    // Allocate 5 pages for the test stack
-    let mut addr = TEST_STACK_START;
+    // Allocate the test stack plus one guard page below its nominal base.
+    // Exception delivery can consume that page while switching back from the
+    // one-instruction frame (observed at TEST_STACK_START - 0x408).
+    let mut addr = TEST_STACK_START - 0x1000;
     while addr < TEST_STACK {
         let stack_page_start = VirtAddr::new(addr as u64);
         kernel.memory_manager.map_addr(stack_page_start)?;
@@ -223,23 +227,25 @@ pub extern "x86-interrupt" fn double_fault_handler_testing(
 }
 
 pub fn init_dataset(dataset: Box<dyn Dataset>) {
-    // Enable the xsave instruction
+    // OSXSAVE must be enabled before CPUID reports OSXSAVE support. Verify
+    // feature availability before setting XCR0: AVX-512 component bits raise
+    // #GP on a host that does not expose AVX-512.
     unsafe {
         Cr4::update(|flags| {
             *flags = flags.union(Cr4Flags::OSXSAVE | Cr4Flags::OSFXSR | Cr4Flags::OSXMMEXCPT_ENABLE)
         });
-        XCr0::write(
-            XCr0Flags::X87
-                | XCr0Flags::SSE
-                | XCr0Flags::AVX
-                | XCr0Flags::OPMASK
-                | XCr0Flags::ZMM_HI256
-                | XCr0Flags::HI16_ZMM,
-        );
     }
+    let has_avx512f = verify_cpu();
 
-    // Verifies the CPU features
-    verify_cpu();
+    // Scalar and AVX runs need the x87, SSE, and AVX state components;
+    // AVX-512 components are enabled only when present.
+    unsafe {
+        let mut xcr0 = XCr0Flags::X87 | XCr0Flags::SSE | XCr0Flags::AVX;
+        if has_avx512f {
+            xcr0 = xcr0.union(XCr0Flags::OPMASK | XCr0Flags::ZMM_HI256 | XCr0Flags::HI16_ZMM);
+        }
+        XCr0::write(xcr0);
+    }
 
     // Sets the generic handler
     unsafe {
@@ -287,9 +293,30 @@ pub extern "C" fn run_test() -> ! {
 
     let rip = set_ice_instruction(&test.insn[..test.size as usize]).as_u64();
     test.state.rip = rip;
+    // FXSAVE/FXRSTOR carries one canonical physical x87/MMX register file.
+    // x87 logical and MMX views have already been merged by the host client.
+    test.state.avx.prepare_fpu_restore(&test.state.fpu);
 
     unsafe {
-        *(MEM_ADDR as *mut u64) = test.state.mem0;
+        if test.state.scratch_memory_len != 0 {
+            assert_eq!(test.state.scratch_memory_len as usize, SCRATCH_MEMORY_SIZE);
+            core::ptr::copy_nonoverlapping(
+                test.state.scratch_memory.as_ptr(),
+                MEM_ADDR as *mut u8,
+                SCRATCH_MEMORY_SIZE,
+            );
+        } else {
+            *(MEM_ADDR as *mut u64) = test.state.mem0;
+            *(MEM1_ADDR as *mut u64) = test.state.mem1;
+        }
+    }
+
+    // The interrupt stub writes only machine-state fields into this fixed
+    // buffer. Seed it first so transport-only fields (notably raw scratch
+    // memory and its presence marker) survive until `landing_pad` captures
+    // their post-instruction values.
+    unsafe {
+        core::ptr::copy_nonoverlapping(&test.state, CPU_DUMP_START as *mut CpuState, 1);
     }
 
     // test.state.flags.0 &= !INTERRUPT_FLAG_MASK;
@@ -363,6 +390,9 @@ pub extern "C" fn run_test() -> ! {
             "mov r12, [r15 + {OFFSET_R12}]",
             "mov r13, [r15 + {OFFSET_R13}]",
 
+            /* Restore the shared x87/MMX and legacy SSE state for this test. */
+            "fxrstor64 [r15 + {OFFSET_AVX}]",
+
             /*
                 Switch to the artificial iretq frame.
                 After this, do not touch memory through rsp except via iretq.
@@ -383,8 +413,7 @@ pub extern "C" fn run_test() -> ! {
 
             CPU_DUMP_ADDR = in(reg) &test.state,
 
-            // TODO: Restore vector state with XRSTOR after the XSAVE path is validated.
-
+            OFFSET_AVX = const OFFSET_AVX,
             OFFSET_RIP = const OFFSET_RIP,
             OFFSET_FLAGS = const OFFSET_FLAGS,
 
@@ -413,8 +442,24 @@ pub extern "C" fn run_test() -> ! {
 }
 
 pub fn landing_pad(state: &mut CpuState, exception: Option<ExceptionVector>) {
-    // Read the memory value
-    state.mem0 = unsafe { *(MEM_ADDR as *const u64) };
+    // The interrupt entry FXSAVE image contains the canonical physical
+    // x87/MMX register file. The client projects it back into requested views.
+    state.fpu = state.avx.fpu_state();
+
+    // Return either the requested raw scratch range or legacy word views.
+    if state.scratch_memory_len != 0 {
+        assert_eq!(state.scratch_memory_len as usize, SCRATCH_MEMORY_SIZE);
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                MEM_ADDR as *const u8,
+                state.scratch_memory.as_mut_ptr(),
+                SCRATCH_MEMORY_SIZE,
+            );
+        }
+    } else {
+        state.mem0 = unsafe { *(MEM_ADDR as *const u64) };
+        state.mem1 = unsafe { *(MEM1_ADDR as *const u64) };
+    }
 
     let exception = exception.map(|kind| {
         let mut insn = [0u8; 15];
@@ -439,7 +484,7 @@ pub fn landing_pad(state: &mut CpuState, exception: Option<ExceptionVector>) {
     }
 }
 
-fn verify_cpu() {
+fn verify_cpu() -> bool {
     let cpuid = CpuId::new();
 
     let f1 = cpuid.get_feature_info().unwrap();
@@ -465,5 +510,6 @@ fn verify_cpu() {
         Cr0::read().contains(Cr0Flags::EMULATE_COPROCESSOR)
     );
 
-    assert!(has_sse && has_sse2 && has_avx && has_xsave && has_avx512f && has_osxsave);
+    assert!(has_sse && has_sse2 && has_avx && has_xsave && has_osxsave);
+    has_avx512f
 }

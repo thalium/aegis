@@ -1,5 +1,16 @@
-[parallel]
-run: kernel client
+run *args:
+    #!/usr/bin/env bash
+    # Start the guest first: QEMU exposes its serial socket before the UART is
+    # ready, so the client needs the same short delay as the standalone recipe.
+    (
+        cd aegis
+        cargo run --release
+    ) &
+    kernel_pid=$!
+    trap 'kill "$kernel_pid" 2>/dev/null || true' EXIT
+    sleep 2
+    cd client
+    cargo run --release -- {{args}}
 
 kernel:
     #!/usr/bin/env bash
@@ -11,6 +22,9 @@ kernel:
     fi
 
 client *args:
+    # QEMU creates the serial socket before the guest has initialized its UART.
+    # Give the guest a short head start so the first HELLO is not truncated.
+    sleep 2
     cd client && cargo run --release -- {{args}}
 
 fmt-check:
