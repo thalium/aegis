@@ -10,7 +10,7 @@ use aegis::{Aegis, NamedTestCase, Test};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use libaegis::{
-    cpu::{CpuState, FlagState, SCRATCH_MEMORY_SIZE},
+    cpu::{AvxState, CpuState, FlagState, SCRATCH_MEMORY_SIZE},
     testcase::TestCase,
 };
 use postgres::{Client as PgClient, NoTls, types::Json};
@@ -121,29 +121,68 @@ fn x87_physical_register_index(key: &str) -> Option<usize> {
         .filter(|&index| index < 8)
 }
 
-fn value_to_x87(value: &Value) -> Result<[u8; 10], Box<dyn Error>> {
+/// Little-endian register payload encoded as exactly `N * 2` hexadecimal
+/// digits, the transport shared by the 10-byte x87 and 16-byte XMM values.
+fn xmm_register_index(key: &str) -> Option<usize> {
+    key.strip_prefix("xmm")?
+        .parse::<usize>()
+        .ok()
+        .filter(|&index| index < 16)
+}
+
+fn value_to_hex_bytes<const N: usize>(
+    what: &str,
+    value: &Value,
+) -> Result<[u8; N], Box<dyn Error>> {
     let Value::String(text) = value else {
         return Err(format!(
-            "x87 register value must be a 20-digit hexadecimal string, got {value}"
+            "{what} value must be a {}-digit hexadecimal string, got {value}",
+            N * 2
         )
         .into());
     };
     let text = text.strip_prefix("0x").unwrap_or(text);
-    if text.len() != 20 || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if text.len() != N * 2 || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(format!(
-            "invalid x87 register encoding {text:?}; expected 20 hexadecimal digits"
+            "invalid {what} encoding {text:?}; expected {} hexadecimal digits",
+            N * 2
         )
         .into());
     }
-    let mut out = [0; 10];
+    let mut out = [0; N];
     for (index, byte) in out.iter_mut().enumerate() {
         *byte = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16)?;
     }
     Ok(out)
 }
 
-fn json_x87(value: &[u8; 10]) -> Value {
+fn value_to_x87(value: &Value) -> Result<[u8; 10], Box<dyn Error>> {
+    value_to_hex_bytes("x87 register", value)
+}
+
+/// XMM inputs are 32 hexadecimal digits (16 little-endian bytes). A JSON
+/// number stays accepted for compatibility: it names the low lane only.
+fn value_to_xmm(value: &Value) -> Result<[u8; 16], Box<dyn Error>> {
+    match value {
+        Value::String(_) => value_to_hex_bytes("xmm register", value),
+        Value::Number(_) => {
+            let mut bytes = [0; 16];
+            set_vector(&mut bytes, value_to_u64(value)? & REG_VALUE_MASK);
+            Ok(bytes)
+        }
+        other => Err(format!(
+            "xmm register value must be a 32-digit hexadecimal string or a number, got {other}"
+        )
+        .into()),
+    }
+}
+
+fn json_hex_bytes(value: &[u8]) -> Value {
     Value::String(value.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+fn json_x87(value: &[u8; 10]) -> Value {
+    json_hex_bytes(value)
 }
 
 /// Raw bytes at the bounded `mem0` scratch range. Unlike `mem0_value`, this
@@ -175,7 +214,7 @@ fn value_to_scratch_memory(value: &Value) -> Result<[u8; SCRATCH_MEMORY_SIZE], B
 }
 
 fn json_scratch_memory(value: &[u8; SCRATCH_MEMORY_SIZE]) -> Value {
-    Value::String(value.iter().map(|byte| format!("{byte:02x}")).collect())
+    json_hex_bytes(value)
 }
 
 fn value_to_u64(value: &Value) -> Result<u64, Box<dyn Error>> {
@@ -386,7 +425,17 @@ fn apply_state(
         }
     }
 
+    // MXCSR lives in the FXSAVE image the kernel restores; write the reset
+    // value up front so rows without an `mxcsr` key behave as before.
+    let has_sse = state_data
+        .keys()
+        .any(|key| key == "mxcsr" || xmm_register_index(key).is_some());
+    cpu_state.avx.set_mxcsr(AvxState::MXCSR_DEFAULT);
+
     let mut reg_keys = Vec::new();
+    if has_sse {
+        reg_keys.push("mxcsr".to_string());
+    }
 
     for (key, value) in state_data {
         if key == "scratch_memory" {
@@ -402,6 +451,11 @@ fn apply_state(
         }
         if let Some(index) = x87_physical_register_index(key) {
             cpu_state.fpu.registers[index] = value_to_x87(value)?;
+            reg_keys.push(key.clone());
+            continue;
+        }
+        if let Some(index) = xmm_register_index(key) {
+            cpu_state.avx.set_xmm(index, &value_to_xmm(value)?);
             reg_keys.push(key.clone());
             continue;
         }
@@ -575,12 +629,14 @@ fn apply_state(
                 cpu_state.seg.ss = value;
                 reg_keys.push(key.clone());
             }
-            "xmm0" | "xmm1" | "xmm2" | "xmm3" | "xmm4" | "xmm5" | "xmm6" | "xmm7" | "xmm8"
-            | "xmm9" | "xmm10" | "xmm11" | "xmm12" | "xmm13" | "xmm14" | "xmm15" => {
-                let idx = key[3..].parse::<usize>()?;
-                let mut bytes = [0; 16];
-                set_vector(&mut bytes, value);
-                cpu_state.avx.set_xmm(idx, &bytes);
+            "mxcsr" => {
+                if value > 0xffff {
+                    return Err(format!(
+                        "mxcsr must fit in 16 bits with no reserved bits set, got {value:#x}"
+                    )
+                    .into());
+                }
+                cpu_state.avx.set_mxcsr(value as u32);
                 reg_keys.push(key.clone());
             }
             "ymm0" | "ymm1" | "ymm2" | "ymm3" | "ymm4" | "ymm5" | "ymm6" | "ymm7" | "ymm8"
@@ -611,6 +667,9 @@ fn get_state_value(cpu_state: &CpuState, key: &str) -> Result<Value, Box<dyn Err
     }
     if let Some(index) = x87_physical_register_index(key) {
         return Ok(json_x87(&cpu_state.fpu.registers[index]));
+    }
+    if let Some(index) = xmm_register_index(key) {
+        return Ok(json_hex_bytes(&cpu_state.avx.get_xmm(index)));
     }
 
     let value = match key {
@@ -655,11 +714,7 @@ fn get_state_value(cpu_state: &CpuState, key: &str) -> Result<Value, Box<dyn Err
         "fs" => cpu_state.seg.fs,
         "gs" => cpu_state.seg.gs,
         "ss" => cpu_state.seg.ss,
-        "xmm0" | "xmm1" | "xmm2" | "xmm3" | "xmm4" | "xmm5" | "xmm6" | "xmm7" | "xmm8" | "xmm9"
-        | "xmm10" | "xmm11" | "xmm12" | "xmm13" | "xmm14" | "xmm15" => {
-            let idx = key[3..].parse::<usize>()?;
-            u64::from_le_bytes(cpu_state.avx.get_xmm(idx)[..8].try_into()?)
-        }
+        "mxcsr" => cpu_state.avx.mxcsr() as u64,
         "ymm0" | "ymm1" | "ymm2" | "ymm3" | "ymm4" | "ymm5" | "ymm6" | "ymm7" | "ymm8" | "ymm9"
         | "ymm10" | "ymm11" | "ymm12" | "ymm13" | "ymm14" | "ymm15" => {
             let idx = key[3..].parse::<usize>()?;
@@ -936,5 +991,78 @@ mod tests {
         state.insert("mem0_value".into(), Value::from(0));
         let error = apply_state(&mut CpuState::zero(), &state).unwrap_err();
         assert!(error.to_string().contains("scratch_memory cannot be mixed"));
+    }
+
+    #[test]
+    fn xmm_accepts_hex_string_and_number_and_round_trips_full_width() {
+        let hex = "000102030405060708090a0b0c0d0e0f";
+        let mut state = Map::new();
+        state.insert("xmm3".into(), Value::String(hex.into()));
+        state.insert("xmm4".into(), Value::from(0x1122_3344_5566_7788u64));
+
+        let mut cpu = CpuState::zero();
+        let keys = apply_state(&mut cpu, &state).unwrap();
+
+        assert_eq!(cpu.avx.get_xmm(3), core::array::from_fn(|i| i as u8));
+        assert_eq!(
+            cpu.avx.get_xmm(4),
+            [
+                0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0, 0, 0, 0, 0, 0, 0, 0
+            ]
+        );
+        assert_eq!(get_state_value(&cpu, "xmm3").unwrap(), state["xmm3"]);
+        assert_eq!(
+            get_state_value(&cpu, "xmm4").unwrap(),
+            Value::String("8877665544332211".to_string() + &"0".repeat(16))
+        );
+        assert!(keys.contains(&"mxcsr".to_string()));
+
+        let result = serialize_state(&cpu, &keys, false).unwrap();
+        assert_eq!(result["xmm3"], state["xmm3"]);
+        assert_eq!(result["mxcsr"], Value::from(0x1f80));
+    }
+
+    #[test]
+    fn xmm_rejects_malformed_values() {
+        for bad in [Value::String("00ff".into()), Value::Bool(true)] {
+            let mut state = Map::new();
+            state.insert("xmm0".into(), bad);
+            let error = apply_state(&mut CpuState::zero(), &state).unwrap_err();
+            assert!(error.to_string().contains("xmm register"), "{error}");
+        }
+    }
+
+    #[test]
+    fn mxcsr_round_trips_and_rejects_reserved_bits() {
+        let mut state = Map::new();
+        state.insert("mxcsr".into(), Value::from(0x9f80));
+
+        let mut cpu = CpuState::zero();
+        let keys = apply_state(&mut cpu, &state).unwrap();
+        assert_eq!(cpu.avx.mxcsr(), 0x9f80);
+        assert_eq!(get_state_value(&cpu, "mxcsr").unwrap(), Value::from(0x9f80));
+        assert!(keys.contains(&"mxcsr".to_string()));
+
+        state.insert("mxcsr".into(), Value::from(0x1_0000u64));
+        let error = apply_state(&mut CpuState::zero(), &state).unwrap_err();
+        assert!(error.to_string().contains("mxcsr must fit in 16 bits"));
+    }
+
+    #[test]
+    fn states_without_sse_keys_get_the_default_mxcsr_and_no_mxcsr_output() {
+        let mut state = Map::new();
+        state.insert("rax".into(), Value::from(1u64));
+
+        let mut cpu = CpuState::zero();
+        let keys = apply_state(&mut cpu, &state).unwrap();
+
+        assert_eq!(cpu.avx.mxcsr(), 0x1f80);
+        assert!(!keys.contains(&"mxcsr".to_string()));
+        assert!(
+            serialize_state(&cpu, &keys, false)
+                .unwrap()
+                .get("mxcsr")
+                .is_none()
+        );
     }
 }
