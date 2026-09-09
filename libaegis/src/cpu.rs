@@ -200,11 +200,34 @@ impl AvxState {
     const FXSAVE_ST_OFFSET: usize = 32;
     const FXSAVE_ST_STRIDE: usize = 16;
     const FXSAVE_ST_VALUE_SIZE: usize = 10;
-    const MXCSR_DEFAULT: u32 = 0x1f80;
+    const FXSAVE_MXCSR_MASK_OFFSET: usize = 28;
+    /// Value MXCSR holds after `FNINIT`-equivalent reset: all exceptions
+    /// masked, round-to-nearest, no FTZ/DAZ.
+    pub const MXCSR_DEFAULT: u32 = 0x1f80;
+
+    /// Writes MXCSR into the legacy FXSAVE image. Reserved bits (16 and up)
+    /// make `FXRSTOR` fault, so callers must pass a 16-bit value.
+    pub fn set_mxcsr(&mut self, mxcsr: u32) {
+        assert!(mxcsr <= 0xffff, "MXCSR reserved bits must be zero");
+        self.data[Self::FXSAVE_MXCSR_OFFSET..Self::FXSAVE_MXCSR_OFFSET + 4]
+            .copy_from_slice(&mxcsr.to_le_bytes());
+    }
+
+    /// Reads MXCSR back out of the legacy FXSAVE image.
+    pub fn mxcsr(&self) -> u32 {
+        u32::from_le_bytes(
+            self.data[Self::FXSAVE_MXCSR_OFFSET..Self::FXSAVE_MXCSR_OFFSET + 4]
+                .try_into()
+                .unwrap(),
+        )
+    }
 
     /// Prepares the legacy FXSAVE portion for `FXRSTOR` from the canonical
     /// physical x87/MMX register file. The SSE/AVX portions remain untouched.
     pub fn prepare_fpu_restore(&mut self, fpu: &FpuState) {
+        // The MXCSR the caller placed in the image is architectural SSE state,
+        // not x87 state: preserve it across the legacy-area wipe.
+        let mxcsr = self.mxcsr();
         self.data[..Self::XMM_OFFSET].fill(0);
         self.data[Self::FXSAVE_X87_CONTROL_OFFSET..Self::FXSAVE_X87_CONTROL_OFFSET + 2]
             .copy_from_slice(&fpu.control.to_le_bytes());
@@ -217,8 +240,9 @@ impl AvxState {
             .copy_from_slice(&fpu.instruction_pointer.to_le_bytes());
         self.data[Self::FXSAVE_X87_DP_OFFSET..Self::FXSAVE_X87_DP_OFFSET + 8]
             .copy_from_slice(&fpu.data_pointer.to_le_bytes());
-        self.data[Self::FXSAVE_MXCSR_OFFSET..Self::FXSAVE_MXCSR_OFFSET + 4]
-            .copy_from_slice(&Self::MXCSR_DEFAULT.to_le_bytes());
+        self.set_mxcsr(mxcsr & 0xffff);
+        // MXCSR_MASK of zero means "use the processor default mask".
+        self.data[Self::FXSAVE_MXCSR_MASK_OFFSET..Self::FXSAVE_MXCSR_MASK_OFFSET + 4].fill(0);
         for logical_index in 0..8 {
             let offset = Self::FXSAVE_ST_OFFSET + logical_index * Self::FXSAVE_ST_STRIDE;
             self.data[offset..offset + Self::FXSAVE_ST_VALUE_SIZE]
@@ -385,6 +409,34 @@ mod tests {
         assert_eq!(&avx.data[st1..st1 + 10], &[0x11; 10]);
         assert_eq!(avx.fpu_state(), fpu);
         assert_eq!(avx.get_xmm(1), [0x5a; 16]);
+    }
+
+    #[test]
+    fn mxcsr_round_trips_through_the_fxsave_image() {
+        let mut avx = AvxState::default();
+
+        avx.set_mxcsr(0x9f80);
+
+        assert_eq!(avx.mxcsr(), 0x9f80);
+        assert_eq!(
+            &avx.data[AvxState::FXSAVE_MXCSR_OFFSET..AvxState::FXSAVE_MXCSR_OFFSET + 4],
+            &0x9f80u32.to_le_bytes()
+        );
+    }
+
+    #[test]
+    fn prepare_fpu_restore_preserves_mxcsr_and_zeroes_its_mask() {
+        let mut avx = AvxState::default();
+        avx.data[AvxState::FXSAVE_MXCSR_MASK_OFFSET] = 0xff;
+        avx.set_mxcsr(0x1fc0);
+
+        avx.prepare_fpu_restore(&FpuState::zero());
+
+        assert_eq!(avx.mxcsr(), 0x1fc0);
+        assert_eq!(
+            &avx.data[AvxState::FXSAVE_MXCSR_MASK_OFFSET..AvxState::FXSAVE_MXCSR_MASK_OFFSET + 4],
+            &[0; 4]
+        );
     }
 
     #[test]
