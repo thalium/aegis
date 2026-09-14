@@ -130,6 +130,13 @@ fn xmm_register_index(key: &str) -> Option<usize> {
         .filter(|&index| index < 16)
 }
 
+fn ymm_register_index(key: &str) -> Option<usize> {
+    key.strip_prefix("ymm")?
+        .parse::<usize>()
+        .ok()
+        .filter(|&index| index < 16)
+}
+
 fn value_to_hex_bytes<const N: usize>(
     what: &str,
     value: &Value,
@@ -172,6 +179,23 @@ fn value_to_xmm(value: &Value) -> Result<[u8; 16], Box<dyn Error>> {
         }
         other => Err(format!(
             "xmm register value must be a 32-digit hexadecimal string or a number, got {other}"
+        )
+        .into()),
+    }
+}
+
+/// YMM inputs are 64 hexadecimal digits (32 little-endian bytes); a JSON
+/// number names the low lane only, like `xmmN`.
+fn value_to_ymm(value: &Value) -> Result<[u8; 32], Box<dyn Error>> {
+    match value {
+        Value::String(_) => value_to_hex_bytes("ymm register", value),
+        Value::Number(_) => {
+            let mut bytes = [0; 32];
+            set_vector(&mut bytes, value_to_u64(value)? & REG_VALUE_MASK);
+            Ok(bytes)
+        }
+        other => Err(format!(
+            "ymm register value must be a 64-digit hexadecimal string or a number, got {other}"
         )
         .into()),
     }
@@ -425,11 +449,11 @@ fn apply_state(
         }
     }
 
-    // MXCSR lives in the FXSAVE image the kernel restores; write the reset
+    // MXCSR lives in the XSAVE image the kernel restores; write the reset
     // value up front so rows without an `mxcsr` key behave as before.
-    let has_sse = state_data
-        .keys()
-        .any(|key| key == "mxcsr" || xmm_register_index(key).is_some());
+    let has_sse = state_data.keys().any(|key| {
+        key == "mxcsr" || xmm_register_index(key).is_some() || ymm_register_index(key).is_some()
+    });
     cpu_state.avx.set_mxcsr(AvxState::MXCSR_DEFAULT);
 
     let mut reg_keys = Vec::new();
@@ -456,6 +480,11 @@ fn apply_state(
         }
         if let Some(index) = xmm_register_index(key) {
             cpu_state.avx.set_xmm(index, &value_to_xmm(value)?);
+            reg_keys.push(key.clone());
+            continue;
+        }
+        if let Some(index) = ymm_register_index(key) {
+            cpu_state.avx.set_ymm(index, &value_to_ymm(value)?);
             reg_keys.push(key.clone());
             continue;
         }
@@ -639,14 +668,6 @@ fn apply_state(
                 cpu_state.avx.set_mxcsr(value as u32);
                 reg_keys.push(key.clone());
             }
-            "ymm0" | "ymm1" | "ymm2" | "ymm3" | "ymm4" | "ymm5" | "ymm6" | "ymm7" | "ymm8"
-            | "ymm9" | "ymm10" | "ymm11" | "ymm12" | "ymm13" | "ymm14" | "ymm15" => {
-                let idx = key[3..].parse::<usize>()?;
-                let mut bytes = [0; 32];
-                set_vector(&mut bytes, value);
-                cpu_state.avx.set_ymm(idx, &bytes);
-                reg_keys.push(key.clone());
-            }
             "zmm0" | "zmm1" | "zmm2" | "zmm3" => {
                 let idx = key[3..].parse::<usize>()?;
                 let mut bytes = [0; 64];
@@ -670,6 +691,9 @@ fn get_state_value(cpu_state: &CpuState, key: &str) -> Result<Value, Box<dyn Err
     }
     if let Some(index) = xmm_register_index(key) {
         return Ok(json_hex_bytes(&cpu_state.avx.get_xmm(index)));
+    }
+    if let Some(index) = ymm_register_index(key) {
+        return Ok(json_hex_bytes(&cpu_state.avx.get_ymm(index)));
     }
 
     let value = match key {
@@ -715,11 +739,6 @@ fn get_state_value(cpu_state: &CpuState, key: &str) -> Result<Value, Box<dyn Err
         "gs" => cpu_state.seg.gs,
         "ss" => cpu_state.seg.ss,
         "mxcsr" => cpu_state.avx.mxcsr() as u64,
-        "ymm0" | "ymm1" | "ymm2" | "ymm3" | "ymm4" | "ymm5" | "ymm6" | "ymm7" | "ymm8" | "ymm9"
-        | "ymm10" | "ymm11" | "ymm12" | "ymm13" | "ymm14" | "ymm15" => {
-            let idx = key[3..].parse::<usize>()?;
-            u64::from_le_bytes(cpu_state.avx.get_ymm(idx)[..8].try_into()?)
-        }
         "zmm0" | "zmm1" | "zmm2" | "zmm3" => {
             let idx = key[3..].parse::<usize>()?;
             u64::from_le_bytes(cpu_state.avx.get_zmm(idx)[..8].try_into()?)
@@ -1020,6 +1039,44 @@ mod tests {
         let result = serialize_state(&cpu, &keys, false).unwrap();
         assert_eq!(result["xmm3"], state["xmm3"]);
         assert_eq!(result["mxcsr"], Value::from(0x1f80));
+    }
+
+    #[test]
+    fn ymm_accepts_hex_string_and_number_and_round_trips_full_width() {
+        let hex: String = (0..32).map(|i| format!("{i:02x}")).collect();
+        let mut state = Map::new();
+        state.insert("ymm3".into(), Value::String(hex.clone()));
+        state.insert("ymm4".into(), Value::from(0x1122_3344_5566_7788u64));
+
+        let mut cpu = CpuState::zero();
+        let keys = apply_state(&mut cpu, &state).unwrap();
+
+        assert_eq!(cpu.avx.get_ymm(3), core::array::from_fn(|i| i as u8));
+        assert_eq!(cpu.avx.get_xmm(3), core::array::from_fn(|i| i as u8));
+        assert_eq!(get_state_value(&cpu, "ymm3").unwrap(), state["ymm3"]);
+        assert_eq!(
+            get_state_value(&cpu, "ymm4").unwrap(),
+            Value::String("8877665544332211".to_string() + &"0".repeat(48))
+        );
+        assert!(keys.contains(&"mxcsr".to_string()));
+
+        let result = serialize_state(&cpu, &keys, false).unwrap();
+        assert_eq!(result["ymm3"], state["ymm3"]);
+        assert_eq!(result["mxcsr"], Value::from(0x1f80));
+    }
+
+    #[test]
+    fn ymm_rejects_malformed_values() {
+        for bad in [
+            Value::String("00".repeat(16)),
+            Value::String("zz".repeat(32)),
+            Value::Bool(true),
+        ] {
+            let mut state = Map::new();
+            state.insert("ymm0".into(), bad);
+            let error = apply_state(&mut CpuState::zero(), &state).unwrap_err();
+            assert!(error.to_string().contains("ymm register"), "{error}");
+        }
     }
 
     #[test]
