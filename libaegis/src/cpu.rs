@@ -165,6 +165,9 @@ impl AvxState {
     const ZMM_HI256_OFFSET: usize = 1152; // component 6: bits 256-511 of zmm0-15 (32 bytes each)
     const HI16_ZMM_OFFSET: usize = 1664; // component 7: full zmm16-31 (64 bytes each)
     const XSTATE_BV_OFFSET: usize = 512; // XSAVE header: XSTATE_BV field (u64)
+    const XCOMP_BV_OFFSET: usize = 520; // XSAVE header: XCOMP_BV field (u64), 0 = standard form
+    const XSAVE_HEADER_END: usize = 576; // header bytes 16..64 are reserved and must be zero
+    const XSTATE_BV_X87: u64 = 1 << 0;
     const XSTATE_BV_SSE: u64 = 1 << 1;
     const XSTATE_BV_AVX: u64 = 1 << 2;
     const XSTATE_BV_ZMM_HI256: u64 = 1 << 6;
@@ -222,9 +225,12 @@ impl AvxState {
         )
     }
 
-    /// Prepares the legacy FXSAVE portion for `FXRSTOR` from the canonical
-    /// physical x87/MMX register file. The SSE/AVX portions remain untouched.
-    pub fn prepare_fpu_restore(&mut self, fpu: &FpuState) {
+    /// Prepares the image for `XRSTOR` of the x87, SSE and AVX components:
+    /// the legacy area is rebuilt from the canonical physical x87/MMX
+    /// register file and the XSAVE header requests all three components in
+    /// the standard format, so a state without `ymmN` keys restores zero
+    /// upper halves instead of stale ones. The XMM and YMM data stay untouched.
+    pub fn prepare_xrstor(&mut self, fpu: &FpuState) {
         // The MXCSR the caller placed in the image is architectural SSE state,
         // not x87 state: preserve it across the legacy-area wipe.
         let mxcsr = self.mxcsr();
@@ -248,6 +254,8 @@ impl AvxState {
             self.data[offset..offset + Self::FXSAVE_ST_VALUE_SIZE]
                 .copy_from_slice(fpu.st(logical_index));
         }
+        self.set_xstate_bv(Self::XSTATE_BV_X87 | Self::XSTATE_BV_SSE | Self::XSTATE_BV_AVX);
+        self.data[Self::XCOMP_BV_OFFSET..Self::XSAVE_HEADER_END].fill(0);
     }
 
     /// Extracts the canonical physical x87/MMX register file from FXSAVE.
@@ -286,12 +294,17 @@ impl AvxState {
         self.mark_xstate_components(Self::XSTATE_BV_SSE);
     }
 
-    /// Returns the full 256-bit value of YMM register `idx` (0-15) as 32 bytes (little-endian).
+    /// Returns the full 256-bit value of YMM register `idx` (0-15) as 32 bytes
+    /// (little-endian). `XSAVE` clears XSTATE_BV[2] when every upper half is
+    /// in its initial (zero) configuration, so the component data is only
+    /// trusted while that bit is set.
     pub fn get_ymm(&self, idx: usize) -> [u8; 32] {
         assert!(idx < 16);
         let mut out = [0u8; 32];
         out[..16].copy_from_slice(&self.data[Self::XMM_OFFSET + idx * 16..][..16]);
-        out[16..32].copy_from_slice(&self.data[Self::YMM_HI_OFFSET + idx * 16..][..16]);
+        if self.xstate_bv() & Self::XSTATE_BV_AVX != 0 {
+            out[16..32].copy_from_slice(&self.data[Self::YMM_HI_OFFSET + idx * 16..][..16]);
+        }
         out
     }
 
@@ -399,7 +412,7 @@ mod tests {
         fpu.registers[1] = [0x22; 10];
         fpu.registers[7] = [0x88; 10];
 
-        avx.prepare_fpu_restore(&fpu);
+        avx.prepare_xrstor(&fpu);
 
         // FXSAVE payload slots are logical: with TOP=7, logical ST0 is
         // canonical physical R7, while logical ST1 is R0.
@@ -425,18 +438,46 @@ mod tests {
     }
 
     #[test]
-    fn prepare_fpu_restore_preserves_mxcsr_and_zeroes_its_mask() {
+    fn prepare_xrstor_preserves_mxcsr_and_zeroes_its_mask() {
         let mut avx = AvxState::default();
         avx.data[AvxState::FXSAVE_MXCSR_MASK_OFFSET] = 0xff;
         avx.set_mxcsr(0x1fc0);
 
-        avx.prepare_fpu_restore(&FpuState::zero());
+        avx.prepare_xrstor(&FpuState::zero());
 
         assert_eq!(avx.mxcsr(), 0x1fc0);
         assert_eq!(
             &avx.data[AvxState::FXSAVE_MXCSR_MASK_OFFSET..AvxState::FXSAVE_MXCSR_MASK_OFFSET + 4],
             &[0; 4]
         );
+    }
+
+    #[test]
+    fn prepare_xrstor_requests_x87_sse_and_avx_in_the_standard_format() {
+        let mut avx = AvxState::default();
+        avx.data[AvxState::XCOMP_BV_OFFSET + 7] = 0x80;
+        avx.data[AvxState::XSAVE_HEADER_END - 1] = 0x11;
+        avx.set_ymm(2, &[0xCC; 32]);
+
+        avx.prepare_xrstor(&FpuState::zero());
+
+        assert_eq!(avx.xstate_bv(), 0b111);
+        assert_eq!(
+            &avx.data[AvxState::XCOMP_BV_OFFSET..AvxState::XSAVE_HEADER_END],
+            &[0; AvxState::XSAVE_HEADER_END - AvxState::XCOMP_BV_OFFSET]
+        );
+        assert_eq!(avx.get_ymm(2), [0xCC; 32]);
+    }
+
+    #[test]
+    fn get_ymm_reports_zero_upper_halves_when_the_avx_component_is_in_init() {
+        let mut avx = AvxState::default();
+        avx.set_ymm(5, &[0xDD; 32]);
+        avx.set_xstate_bv(AvxState::XSTATE_BV_SSE);
+
+        let mut expected = [0u8; 32];
+        expected[..16].fill(0xDD);
+        assert_eq!(avx.get_ymm(5), expected);
     }
 
     #[test]
