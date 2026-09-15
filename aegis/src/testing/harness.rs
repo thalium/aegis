@@ -293,9 +293,9 @@ pub extern "C" fn run_test() -> ! {
 
     let rip = set_ice_instruction(&test.insn[..test.size as usize]).as_u64();
     test.state.rip = rip;
-    // FXSAVE/FXRSTOR carries one canonical physical x87/MMX register file.
+    // The XSAVE image carries one canonical physical x87/MMX register file.
     // x87 logical and MMX views have already been merged by the host client.
-    test.state.avx.prepare_fpu_restore(&test.state.fpu);
+    test.state.avx.prepare_xrstor(&test.state.fpu);
 
     unsafe {
         if test.state.scratch_memory_len != 0 {
@@ -369,6 +369,11 @@ pub extern "C" fn run_test() -> ! {
             */
             "mov r14, rax",
 
+            /* Restore the x87/MMX, SSE and AVX state (XCR0 components 0-2). */
+            "mov eax, 7",
+            "xor edx, edx",
+            "xrstor64 [r15 + {OFFSET_AVX}]",
+
             /*
                 Restore most GPRs.
                 Do not restore r14/r15 yet:
@@ -389,9 +394,6 @@ pub extern "C" fn run_test() -> ! {
             "mov r11, [r15 + {OFFSET_R11}]",
             "mov r12, [r15 + {OFFSET_R12}]",
             "mov r13, [r15 + {OFFSET_R13}]",
-
-            /* Restore the shared x87/MMX and legacy SSE state for this test. */
-            "fxrstor64 [r15 + {OFFSET_AVX}]",
 
             /*
                 Switch to the artificial iretq frame.

@@ -320,11 +320,14 @@ pub extern "C" fn error_handler<const HAS_ERROR_CODE: bool, const VECTOR: u8>() 
         "mov word ptr [rdi + {OFFSET_SS}], ax",
 
         /*
-            Capture the complete legacy x87/MMX/SSE state before Rust executes.
-            CpuState starts with its 64-byte-aligned AVX image, satisfying the
-            FXSAVE alignment requirement.
+            Capture the x87/MMX, SSE and AVX state (XCR0 components 0-2)
+            before Rust executes. CpuState starts with its 64-byte-aligned
+            XSAVE image, satisfying the alignment requirement. RAX and RDX are
+            scratch here: every GPR is already saved from the stack frame.
         */
-        "fxsave64 [rdi + {OFFSET_AVX}]",
+        "mov eax, 7",
+        "xor edx, edx",
+        "xsave64 [rdi + {OFFSET_AVX}]",
 
         /*
             Call inner handler.

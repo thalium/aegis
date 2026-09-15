@@ -92,6 +92,10 @@ impl<T> PeekableReceiver<T> {
     }
 }
 
+/// How long to let the guest boot before sending the first handshake, so its
+/// UART is listening by the time the message arrives.
+const INIT_BOOT_DELAY: Duration = Duration::from_secs(3);
+
 pub struct Aegis {
     sock: UnixStream,
     mmap: MmapMut,
@@ -315,6 +319,12 @@ impl Aegis {
 
     /// Initializes client
     pub fn init(&mut self) {
+        // QEMU creates the serial socket before the guest has initialized its
+        // UART, so a message sent the moment the socket appears arrives
+        // truncated ("ELLO") and the guest never completes the handshake.
+        // Give the kernel time to finish booting before the first message.
+        sleep(INIT_BOOT_DELAY);
+
         // Try to initialize the socket
         loop {
             writeln!(self.sock, "{}", INIT_MSG).expect("[*] Failed to send init message");
